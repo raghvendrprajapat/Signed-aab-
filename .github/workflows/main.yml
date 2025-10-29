@@ -76,7 +76,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # ⬇⬇⬇ IMPORTANT CHANGE: java-version 21 (was 17)
+      # use Java 21 (Capacitor/Gradle wants source release 21)
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -182,7 +182,7 @@ jobs:
 
           echo "WEB_BUILD_DIR currently set to: $WEB_BUILD_DIR"
 
-          # Init Capacitor (no --npm-client, because older cap CLI doesn't like it)
+          # Init Capacitor (no --npm-client flag because older CLI doesn't like it)
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
 
           # Generate capacitor.config.json (not .ts, so no TypeScript needed)
@@ -288,7 +288,7 @@ jobs:
           fi
 
       #################################################################
-      # 6. Build release AAB+APK and upload artifact
+      # 6. Build release AAB+APK and upload artifacts separately
       #################################################################
       - name: Build release
         shell: bash
@@ -296,13 +296,28 @@ jobs:
         run: |
           set -euo pipefail
           ./gradlew clean :app:bundleRelease :app:assembleRelease
-          mkdir -p ../out
-          cp app/build/outputs/bundle/release/*.aab ../out/ || true
-          cp app/build/outputs/apk/release/*.apk ../out/ || true
-          ls -l ../out
 
-      - name: Upload signed bundle/apk
+          # make output folders
+          mkdir -p ../out_aab
+          mkdir -p ../out_apk
+
+          # copy built files
+          cp app/build/outputs/bundle/release/*.aab ../out_aab/ || true
+          cp app/build/outputs/apk/release/*.apk ../out_apk/   || true
+
+          echo "=== AAB files ==="
+          ls -l ../out_aab || true
+          echo "=== APK files ==="
+          ls -l ../out_apk || true
+
+      - name: Upload signed AAB
         uses: actions/upload-artifact@v4
         with:
-          name: signed-release
-          path: out
+          name: signed-aab
+          path: out_aab
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-apk
+          path: out_apk
