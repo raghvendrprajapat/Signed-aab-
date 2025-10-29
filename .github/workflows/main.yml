@@ -76,11 +76,12 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # ⬇⬇⬇ IMPORTANT CHANGE: java-version 21 (was 17)
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -135,7 +136,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # APP_ID must be like com.example.app (lowercase letters/numbers/_ and dots)
+          # APP_ID format check
           if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
             echo "❌ APP_ID invalid: $APP_ID"
             exit 1
@@ -153,7 +154,7 @@ jobs:
             exit 1
           fi
 
-          # secrets must exist
+          # secrets exist?
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then
               echo "❌ Missing secret: $var"
@@ -181,11 +182,10 @@ jobs:
 
           echo "WEB_BUILD_DIR currently set to: $WEB_BUILD_DIR"
 
-          # Init Capacitor project (no --npm-client flag here)
+          # Init Capacitor (no --npm-client, because older cap CLI doesn't like it)
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
 
-          # Create capacitor.config.json (JSON, so Capacitor won't demand TypeScript)
-          # We build JSON manually using printf to avoid heredoc issues
+          # Generate capacitor.config.json (not .ts, so no TypeScript needed)
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
           printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
@@ -232,10 +232,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # move keystore into android app module
           cp ../android.keystore app/release.keystore
 
-          # choose gradle file (.gradle or .gradle.kts)
           if [ -f app/build.gradle ]; then
             FILE="app/build.gradle"
           else
@@ -244,7 +242,6 @@ jobs:
 
           echo "Patching $FILE"
 
-          # set versionCode, versionName, SDK values
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
           sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
 
@@ -257,7 +254,6 @@ jobs:
           sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
 
-          # append signing config ONLY if not present already
           if ! grep -q "signingConfigs" "$FILE"; then
             {
               echo ""
@@ -282,7 +278,6 @@ jobs:
             } >> "$FILE"
           fi
 
-          # allow cleartext traffic if requested
           if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then
             MF="app/src/main/AndroidManifest.xml"
             if [ -f "$MF" ]; then
