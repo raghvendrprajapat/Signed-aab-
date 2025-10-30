@@ -46,16 +46,13 @@ on:
           - "push"
           - "location"
           - "all"
-      BRANDING_URL:
-        description: "Public folder URL that contains icon_xxxhdpi.png and splash.png (optional)"
-        required: false
-        default: ""
+      # NEW: separate URLs for icon and splash (both optional)
       ICON_URL:
-        description: "Direct URL to icon_xxxhdpi.png (optional — overrides BRANDING_URL for icon)"
+        description: "URL for app icon PNG (single file). Optional."
         required: false
         default: ""
       SPLASH_URL:
-        description: "Direct URL to splash.png (optional — overrides BRANDING_URL for splash)"
+        description: "URL for splash PNG (single file). Optional."
         required: false
         default: ""
 
@@ -77,14 +74,18 @@ jobs:
       MIN_SDK: ${{ github.event.inputs.MIN_SDK }}
       ALLOW_MIXED_CONTENT: ${{ github.event.inputs.ALLOW_MIXED_CONTENT }}
       PLUGINS: ${{ github.event.inputs.PLUGINS }}
+      ICON_URL: ${{ github.event.inputs.ICON_URL }}
+      SPLASH_URL: ${{ github.event.inputs.SPLASH_URL }}
 
-      # secrets (must exist in repo → Settings → Secrets and variables → Actions)
+    # secrets (must exist in repo → Settings → Secrets and variables → Actions)
+    secrets:
       KEYSTORE_BASE64:   ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
 
     steps:
+
       - name: Checkout repo
         uses: actions/checkout@v4
 
@@ -100,9 +101,13 @@ jobs:
         with:
           node-version: 20
 
+
       #################################################################
+      #
       # 1. Prepare webDir (works with OR without package.json)
+      #
       #################################################################
+
       - name: Prepare webDir
         shell: bash
         run: |
@@ -116,17 +121,17 @@ jobs:
               npm install
             fi
 
-            # build if build script exists
-            if npm run | grep -q " build"; then
-              npm run build || true
-            fi
+            # build if build script exists      
+            if npm run | grep -q " build"; then      
+              npm run build || true      
+            fi      
 
-            # try common build folders
-            for d in dist build public; do
-              if [ -d "$d" ]; then
-                echo "WEB_BUILD_DIR=$d" >> $GITHUB_ENV
-                break
-              fi
+            # try common build folders      
+            for d in dist build public; do      
+              if [ -d "$d" ]; then      
+                echo "WEB_BUILD_DIR=$d" >> $GITHUB_ENV      
+                break      
+              fi      
             done
           fi
 
@@ -140,16 +145,20 @@ jobs:
           # make sure capacitor deps exist
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
+
       #################################################################
+      #
       # 2. Validate inputs + secrets before wasting time
+      #
       #################################################################
+
       - name: Validate inputs
         shell: bash
         run: |
           set -euo pipefail
 
           # APP_ID format check
-          if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
+          if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_])(.[a-z][a-z0-9_])+$ ]]; then
             echo "❌ APP_ID invalid: $APP_ID"
             exit 1
           fi
@@ -174,9 +183,13 @@ jobs:
             fi
           done
 
+
       #################################################################
+      #
       # 3. Restore keystore from Base64
+      #
       #################################################################
+
       - name: Restore keystore
         shell: bash
         run: |
@@ -184,9 +197,13 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
           ls -l android.keystore
 
+
       #################################################################
+      #
       # 4. Init Capacitor project and generate capacitor.config.json
+      #
       #################################################################
+
       - name: Configure Capacitor
         shell: bash
         run: |
@@ -235,84 +252,47 @@ jobs:
           npx cap add android || true
           npx cap sync android
 
+
       #################################################################
-      # 4.5 Apply branding assets from URL(s) (if provided)
-      # This step now accepts:
-      #  - direct ICON_URL (overrides BRANDING_URL for icon)
-      #  - direct SPLASH_URL (overrides BRANDING_URL for splash)
-      #  - else uses BRANDING_URL base + filenames
+      #
+      # 4.5 Apply branding assets from ICON_URL and SPLASH_URL (if provided)
+      #
+      # This is the ONLY change — copies icon (single PNG) to multiple densities
+      # and copies splash to drawable folders if present.
+      #
       #################################################################
-      - name: Apply branding assets from URL(s) (if provided)
+
+      - name: Apply branding assets from URL (if provided)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
 
-          BASE="${{ github.event.inputs.BRANDING_URL }}"
-          ICON_INPUT="${{ github.event.inputs.ICON_URL }}"
-          SPLASH_INPUT="${{ github.event.inputs.SPLASH_URL }}"
+          ICON="${{ github.event.inputs.ICON_URL }}"
+          SPLASH="${{ github.event.inputs.SPLASH_URL }}"
 
-          # normalize base (ensure trailing slash) only if provided
-          if [ -n "$BASE" ]; then
-            case "$BASE" in */) ;; *) BASE="$BASE/";; esac
+          if [ -z "$ICON" ] && [ -z "$SPLASH" ]; then
+            echo "ICON_URL and SPLASH_URL not provided — skipping branding download"
+            exit 0
           fi
 
-          echo "BRANDING sources:"
-          echo "  BRANDING_URL: '$BASE'"
-          echo "  ICON_URL:     '$ICON_INPUT'"
-          echo "  SPLASH_URL:   '$SPLASH_INPUT'"
-
-          # Determine final icon and splash download URLs
-          if [ -n "$ICON_INPUT" ]; then
-            ICON_SRC="$ICON_INPUT"
-          elif [ -n "$BASE" ]; then
-            ICON_SRC="${BASE}icon_xxxhdpi.png"
-          else
-            ICON_SRC=""
+          if [ -n "$ICON" ]; then
+            echo "Downloading icon from: $ICON"
+            curl -sfSL "$ICON" -o /tmp/icon_xxxhdpi.png || true
           fi
 
-          if [ -n "$SPLASH_INPUT" ]; then
-            SPLASH_SRC="$SPLASH_INPUT"
-          elif [ -n "$BASE" ]; then
-            SPLASH_SRC="${BASE}splash.png"
-          else
-            SPLASH_SRC=""
+          if [ -n "$SPLASH" ]; then
+            echo "Downloading splash from: $SPLASH"
+            curl -sfSL "$SPLASH" -o /tmp/splash.png || true
           fi
 
-          echo "Resolved download targets:"
-          echo "  ICON_SRC:  '${ICON_SRC:-<none>}'"
-          echo "  SPLASH_SRC: '${SPLASH_SRC:-<none>}'"
-
-          # download icon if URL provided
-          if [ -n "$ICON_SRC" ]; then
-            echo "Attempting to download icon from: $ICON_SRC"
-            curl -sfSL "$ICON_SRC" -o /tmp/icon_xxxhdpi.png || { echo "Icon download failed or missing: $ICON_SRC"; }
-          fi
-
-          # download splash if URL provided
-          if [ -n "$SPLASH_SRC" ]; then
-            echo "Attempting to download splash from: $SPLASH_SRC"
-            curl -sfSL "$SPLASH_SRC" -o /tmp/splash.png || { echo "Splash download failed or missing: $SPLASH_SRC"; }
-          fi
-
-          # apply icons if present
+          # apply icons if present (use single icon for all densities)
           if [ -f /tmp/icon_xxxhdpi.png ]; then
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
-          fi
-
-          # copy additional densities if present (only if separate density files downloaded)
-          if [ -f /tmp/icon_xxhdpi.png ]; then
-            cp /tmp/icon_xxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
-          fi
-          if [ -f /tmp/icon_xhdpi.png ]; then
-            cp /tmp/icon_xhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
-          fi
-          if [ -f /tmp/icon_hdpi.png ]; then
-            cp /tmp/icon_hdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
           fi
 
           # apply splash if present
@@ -324,9 +304,13 @@ jobs:
             done
           fi
 
+
       #################################################################
+      #
       # 5. Patch Gradle for versioning, SDK levels, signing
+      #
       #################################################################
+
       - name: Patch Gradle
         shell: bash
         working-directory: android
@@ -344,7 +328,7 @@ jobs:
           echo "Patching $FILE"
 
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
-          sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
+          sed -i -E "s/versionName[ =]+"[^"]+"/versionName "$VERSION_NAME"/" "$FILE" || true
 
           sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE" || true
           sed -i -E "s/minSdk[ =]+[0-9]+/minSdk $MIN_SDK/" "$FILE" || true
@@ -356,41 +340,45 @@ jobs:
           sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
 
           if ! grep -q "signingConfigs" "$FILE"; then
-            {
-              echo ""
-              echo "android {"
-              echo "    signingConfigs {"
-              echo "        release {"
-              echo "            storeFile file(\"release.keystore\")"
-              echo "            storePassword System.getenv(\"KEYSTORE_PASSWORD\")"
-              echo "            keyAlias      System.getenv(\"KEY_ALIAS\")"
-              echo "            keyPassword   System.getenv(\"KEY_PASSWORD\")"
-              echo "        }"
-              echo "    }"
-              echo "    buildTypes {"
-              echo "        release {"
-              echo "            signingConfig signingConfigs.release"
-              echo "            minifyEnabled false"
-              echo "            shrinkResources false"
-              echo "            debuggable false"
-              echo "        }"
-              echo "    }"
-              echo "}"
-            } >> "$FILE"
+          {
+          echo ""
+          echo "android {"
+          echo "    signingConfigs {"
+          echo "        release {"
+          echo "            storeFile file(\"release.keystore\")"
+          echo "            storePassword System.getenv(\"KEYSTORE_PASSWORD\")"
+          echo "            keyAlias      System.getenv(\"KEY_ALIAS\")"
+          echo "            keyPassword   System.getenv(\"KEY_PASSWORD\")"
+          echo "        }"
+          echo "    }"
+          echo "    buildTypes {"
+          echo "        release {"
+          echo "            signingConfig signingConfigs.release"
+          echo "            minifyEnabled false"
+          echo "            shrinkResources false"
+          echo "            debuggable false"
+          echo "        }"
+          echo "    }"
+          echo "}"
+          } >> "$FILE"
           fi
 
           if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then
             MF="app/src/main/AndroidManifest.xml"
             if [ -f "$MF" ]; then
               if ! grep -q usesCleartextTraffic "$MF"; then
-                sed -i 's/<application /<application android:usesCleartextTraffic="true" /' "$MF"
+                sed -i 's/<application /<application android:usesCleartextTraffic=\"true\" /' "$MF"
               fi
             fi
           fi
 
+
       #################################################################
+      #
       # 6. Build release AAB+APK and upload artifacts separately
+      #
       #################################################################
+
       - name: Build release
         shell: bash
         working-directory: android
@@ -403,8 +391,8 @@ jobs:
           mkdir -p ../out_apk
 
           # copy built files
-          cp app/build/outputs/bundle/release/*.aab ../out_aab/ || true
-          cp app/build/outputs/apk/release/*.apk ../out_apk/   || true
+          cp app/build/outputs/bundle/release/.aab ../out_aab/ || true
+          cp app/build/outputs/apk/release/.apk ../out_apk/   || true
 
           echo "=== AAB files ==="
           ls -l ../out_aab || true
