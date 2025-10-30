@@ -43,11 +43,11 @@ on:
           - "location"
           - "all"
       APP_ICON_URL:
-        description: "Full URL to folder containing icon PNGs (or direct file) (optional)"
+        description: "Full URL to icon file OR public folder URL containing icon_xxxhdpi.png etc (optional)"
         required: false
         default: ""
       SPLASH_SCREEN_URL:
-        description: "Full URL to splash PNG (optional)"
+        description: "Full URL to splash file OR public folder URL containing splash.png (optional)"
         required: false
         default: ""
 
@@ -157,7 +157,7 @@ jobs:
           npx cap add android || true
           npx cap sync android
 
-      - name: Apply branding assets from URL(s) (force overwrite & debug)
+      - name: Apply branding assets from URL(s) (robust)
         shell: bash
         working-directory: android
         run: |
@@ -167,29 +167,47 @@ jobs:
           SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
 
           if [ -z "$ICON_SRC" ] && [ -z "$SPLASH_SRC" ]; then
-            echo "No branding URLs provided — skipping branding download"
-            exit 0
+            echo "No branding URLs provided — skipping branding download"; exit 0
           fi
 
-          # normalize
-          if [ -n "$ICON_SRC" ]; then case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac; fi
-          if [ -n "$SPLASH_SRC" ]; then case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac; fi
+          # helper: download file to target path (silent OK)
+          dl() {
+            url="$1"; out="$2"
+            echo "curl -> $url  -> $out"
+            curl -sfSL "$url" -o "$out" || { echo "curl failed for $url (ignored)"; }
+          }
 
-          # download
+          # normalize and download icons:
           if [ -n "$ICON_SRC" ]; then
-            echo "Downloading icons from: $ICON_SRC"
-            curl -sfSL "${ICON_SRC}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
-            curl -sfSL "${ICON_SRC}icon_xxhdpi.png" -o /tmp/icon_xxhdpi.png || true
-            curl -sfSL "${ICON_SRC}icon_xhdpi.png" -o /tmp/icon_xhdpi.png || true
-            curl -sfSL "${ICON_SRC}icon_hdpi.png" -o /tmp/icon_hdpi.png || true
+            # if ICON_SRC ends with .png -> treat as direct file
+            if [[ "$ICON_SRC" =~ \.png$ ]]; then
+              echo "ICON_SRC appears to be a direct PNG file: $ICON_SRC"
+              dl "$ICON_SRC" /tmp/icon_xxxhdpi.png
+            else
+              # ensure trailing slash
+              case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
+              echo "ICON_SRC treated as folder: $ICON_SRC"
+              dl "${ICON_SRC}icon_xxxhdpi.png" /tmp/icon_xxxhdpi.png
+              dl "${ICON_SRC}icon_xxhdpi.png"  /tmp/icon_xxhdpi.png
+              dl "${ICON_SRC}icon_xhdpi.png"   /tmp/icon_xhdpi.png
+              dl "${ICON_SRC}icon_hdpi.png"    /tmp/icon_hdpi.png
+            fi
           fi
+
+          # normalize and download splash:
           if [ -n "$SPLASH_SRC" ]; then
-            echo "Downloading splash from: $SPLASH_SRC"
-            curl -sfSL "${SPLASH_SRC}splash.png" -o /tmp/splash.png || true
+            if [[ "$SPLASH_SRC" =~ \.png$ ]]; then
+              echo "SPLASH_SRC appears to be a direct PNG file: $SPLASH_SRC"
+              dl "$SPLASH_SRC" /tmp/splash.png
+            else
+              case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac
+              echo "SPLASH_SRC treated as folder: $SPLASH_SRC"
+              dl "${SPLASH_SRC}splash.png" /tmp/splash.png
+            fi
           fi
 
           # purge previously generated resources to avoid merge problems
-          echo "Purging old generated resource folders (if present)..."
+          echo "Purging old generated resource folders..."
           rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
 
           # create target folders
@@ -197,7 +215,7 @@ jobs:
           mkdir -p app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
 
-          # copy icons into mipmap
+          # copy icons into mipmap (legacy)
           if [ -f /tmp/icon_xxxhdpi.png ]; then
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
@@ -225,7 +243,7 @@ jobs:
               '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
           fi
 
-          # splash: copy to both drawable and drawable-nodpi (very important)
+          # splash: copy to both drawable and drawable-nodpi
           if [ -f /tmp/splash.png ]; then
             echo "Installing splash image into drawable and drawable-nodpi..."
             cp /tmp/splash.png app/src/main/res/drawable-nodpi/splash.png || true
