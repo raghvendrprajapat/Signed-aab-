@@ -372,6 +372,45 @@ jobs:
           echo "Branding step complete."
 
       #################################################################
+      # 4.6 Ensure Manifest references our icons (NEW step)
+      # This forces <application android:icon/android:roundIcon> to use our generated mipmap icons
+      #################################################################
+      - name: Ensure manifest icon entries
+        shell: bash
+        working-directory: android
+        run: |
+          set -euo pipefail
+          MF="app/src/main/AndroidManifest.xml"
+          if [ ! -f "$MF" ]; then
+            echo "No AndroidManifest.xml found at $MF — skipping manifest patch"
+            exit 0
+          fi
+
+          # single-line replacement: ensure the <application ...> tag contains android:icon and android:roundIcon
+          # This will try to add/replace attributes on the opening <application ...> tag.
+          # Use perl for safer inline XML attribute replacement
+          perl -0777 -pe '
+            if (/<application\b[^>]*>/s) {
+              $app = $&;
+              $new = $app;
+              if ($new !~ /android:icon=/) {
+                $new =~ s/<application/<application android:icon=\"\@mipmap\/ic_launcher\"/;
+              } else {
+                $new =~ s/android:icon=\"[^\"]*\"/android:icon=\"\@mipmap\/ic_launcher\"/g;
+              }
+              if ($new !~ /android:roundIcon=/) {
+                $new =~ s/<application/<application android:roundIcon=\"\@mipmap\/ic_launcher_round\"/;
+              } else {
+                $new =~ s/android:roundIcon=\"[^\"]*\"/android:roundIcon=\"\@mipmap\/ic_launcher_round\"/g;
+              }
+              s/\Q$app\E/$new/;
+            }
+          ' -i "$MF" || true
+
+          echo "Patched AndroidManifest (first 80 lines):"
+          sed -n '1,80p' "$MF" || true
+
+      #################################################################
       # 5. Patch Gradle for versioning, SDK levels, signing
       #################################################################
       - name: Patch Gradle
