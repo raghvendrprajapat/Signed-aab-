@@ -229,7 +229,7 @@ jobs:
           npx cap sync android
 
       #################################################################
-      # 4.5 Apply branding assets from URL(s) (if provided) -- UPDATED
+      # 4.5 Apply branding assets from URL(s) (if provided) -- FIXED
       #################################################################
       - name: Apply branding assets from URL(s) (if provided)
         shell: bash
@@ -291,25 +291,23 @@ jobs:
           # --- adaptive icon: create foreground/background + xml that points to them ---
           if [ -f /tmp/icon_xxxhdpi.png ]; then
             echo "Creating adaptive icon foreground/background and XML..."
-            # use same image for foreground/background (simple). If you prefer separate BG, upload separate file.
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
 
-            cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-  <background android:drawable="@mipmap/ic_launcher_background"/>
-  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
-</adaptive-icon>
-EOF
+            # write ic_launcher.xml using printf (avoids YAML parsing issues)
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+              '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
+              '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
+              '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
 
-            cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-  <background android:drawable="@mipmap/ic_launcher_background"/>
-  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
-</adaptive-icon>
-EOF
+            # write ic_launcher_round.xml
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+              '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
+              '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
+              '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
+
             echo "Adaptive icon files written."
           else
             echo "No /tmp/icon_xxxhdpi.png found — adaptive icon not created."
@@ -322,35 +320,26 @@ EOF
 
             LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
             if [ -f "$LAUNCH_XML" ]; then
-              # attempt to replace any existing bitmap line to point to our splash resource
-              if grep -q "android:src=\"@drawable/" "$LAUNCH_XML" 2>/dev/null; then
-                sed -i 's@android:src=\"@REPLACETMP@' "$LAUNCH_XML" || true
-              fi
-              # ensure it contains reference to @drawable/splash (best-effort)
+              # best-effort: ensure launch_background contains reference to @drawable/splash
               if ! grep -q "@drawable/splash" "$LAUNCH_XML" 2>/dev/null; then
-                # fallback: overwrite with a simple layer-list that centers the splash
-                cat > "$LAUNCH_XML" <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="@android:color/white" />
-    <item>
-        <bitmap android:gravity="center" android:src="@drawable/splash" />
-    </item>
-</layer-list>
-EOF
+                printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+                  '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' \
+                  '    <item android:drawable="@android:color/white" />' \
+                  '    <item>' \
+                  '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
+                  '    </item>' \
+                  '</layer-list>' > "$LAUNCH_XML" || true
               fi
             else
               # create a simple launch_background.xml that centers splash.png
               mkdir -p app/src/main/res/drawable
-              cat > "$LAUNCH_XML" <<'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:drawable="@android:color/white" />
-    <item>
-        <bitmap android:gravity="center" android:src="@drawable/splash" />
-    </item>
-</layer-list>
-EOF
+              printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+                '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' \
+                '    <item android:drawable="@android:color/white" />' \
+                '    <item>' \
+                '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
+                '    </item>' \
+                '</layer-list>' > "$LAUNCH_XML" || true
             fi
             echo "Splash applied and launch_background updated/created."
           else
