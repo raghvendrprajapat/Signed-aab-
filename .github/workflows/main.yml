@@ -43,11 +43,11 @@ on:
           - "location"
           - "all"
       APP_ICON_URL:
-        description: "Public folder URL that contains app icon PNGs (optional)"
+        description: "Full URL to folder containing icon PNGs (or direct file) (optional)"
         required: false
         default: ""
       SPLASH_SCREEN_URL:
-        description: "Public folder URL for splash screen PNG (optional)"
+        description: "Full URL to splash PNG (optional)"
         required: false
         default: ""
 
@@ -57,7 +57,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
 
     env:
       APP_NAME: ${{ github.event.inputs.APP_NAME }}
@@ -157,11 +157,12 @@ jobs:
           npx cap add android || true
           npx cap sync android
 
-      - name: Apply branding assets from URL(s) (overwrite & debug)
+      - name: Apply branding assets from URL(s) (force overwrite & debug)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
+
           ICON_SRC="${{ github.event.inputs.APP_ICON_URL }}"
           SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
 
@@ -174,7 +175,7 @@ jobs:
           if [ -n "$ICON_SRC" ]; then case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac; fi
           if [ -n "$SPLASH_SRC" ]; then case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac; fi
 
-          # download (ok if missing)
+          # download
           if [ -n "$ICON_SRC" ]; then
             echo "Downloading icons from: $ICON_SRC"
             curl -sfSL "${ICON_SRC}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
@@ -187,18 +188,17 @@ jobs:
             curl -sfSL "${SPLASH_SRC}splash.png" -o /tmp/splash.png || true
           fi
 
-          # remove any old resource files to avoid merge-leftovers
-          echo "Removing old generated mipmap/drawable resources (if any) to force overwrite..."
+          # purge previously generated resources to avoid merge problems
+          echo "Purging old generated resource folders (if present)..."
           rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
 
-          # create resource dirs
+          # create target folders
           mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
           mkdir -p app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
 
-          # copy icons
+          # copy icons into mipmap
           if [ -f /tmp/icon_xxxhdpi.png ]; then
-            echo "Copying legacy mipmap icons..."
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
@@ -211,7 +211,6 @@ jobs:
 
           # adaptive icon
           if [ -f /tmp/icon_xxxhdpi.png ]; then
-            echo "Creating adaptive icon..."
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
@@ -226,10 +225,13 @@ jobs:
               '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
           fi
 
-          # splash
+          # splash: copy to both drawable and drawable-nodpi (very important)
           if [ -f /tmp/splash.png ]; then
-            echo "Installing splash image..."
+            echo "Installing splash image into drawable and drawable-nodpi..."
             cp /tmp/splash.png app/src/main/res/drawable-nodpi/splash.png || true
+            cp /tmp/splash.png app/src/main/res/drawable/splash.png || true
+
+            # ensure launch_background exists and references @drawable/splash
             LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
             mkdir -p app/src/main/res/drawable
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
@@ -239,21 +241,22 @@ jobs:
               '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
               '    </item>' \
               '</layer-list>' > "$LAUNCH_XML" || true
-            echo "Splash applied."
+          else
+            echo "No /tmp/splash.png found — splash not applied."
           fi
 
-          # debug listing
+          # debug listings (must appear in logs)
           echo "=== DEBUG: /tmp files ==="
           ls -l /tmp/icon_* /tmp/splash.png || true
-          echo "=== DEBUG: mipmap-anydpi-v26 ==="
+          echo "=== DEBUG: res mipmap-anydpi-v26 ==="
           ls -l app/src/main/res/mipmap-anydpi-v26 || true
-          echo "=== DEBUG: mipmap-* folders ==="
+          echo "=== DEBUG: res mipmap-* ==="
           ls -l app/src/main/res/mipmap-* | sed -n '1,200p' || true
-          echo "=== DEBUG: drawable folders ==="
+          echo "=== DEBUG: res drawable* ==="
           ls -l app/src/main/res/drawable* | sed -n '1,200p' || true
           if [ -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml ]; then sed -n '1,200p' app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true; fi
           if [ -f app/src/main/res/drawable/launch_background.xml ]; then sed -n '1,200p' app/src/main/res/drawable/launch_background.xml || true; fi
-          echo "Branding step complete."
+          echo "Branding step done."
 
       - name: Ensure manifest icon entries
         shell: bash
@@ -261,7 +264,7 @@ jobs:
         run: |
           set -euo pipefail
           MF="app/src/main/AndroidManifest.xml"
-          if [ ! -f "$MF" ]; then echo "No AndroidManifest.xml found at $MF — skipping manifest patch"; exit 0; fi
+          if [ ! -f "$MF" ]; then echo "No AndroidManifest.xml found — skipping manifest patch"; exit 0; fi
           perl -0777 -pe '
             if (/<application\b[^>]*>/s) {
               $app = $&;
@@ -273,7 +276,7 @@ jobs:
               s/\Q$app\E/$new/;
             }
           ' -i "$MF" || true
-          echo "Patched AndroidManifest (first 80 lines):"
+          echo "Patched AndroidManifest (first lines):"
           sed -n '1,80p' "$MF" || true
 
       - name: Patch Gradle
@@ -328,23 +331,20 @@ jobs:
         working-directory: android
         run: |
           set -euo pipefail
-          # ensure clean build (force remove build caches)
           ./gradlew clean --no-daemon
           ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon
 
           mkdir -p ../out_aab ../out_apk
           cp app/build/outputs/bundle/release/*.aab ../out_aab/ || true
-          cp app/build/outputs/apk/release/*.apk ../out_apk/ || true
+          cp app/build/outputs/apk/release/*.apk ../out_apk/   || true
 
           echo "=== AAB files ==="; ls -l ../out_aab || true
           echo "=== APK files ==="; ls -l ../out_apk || true
 
-          # Debug: list inside first APK (if exists) to confirm mipmap & drawable resources are present
           if ls ../out_apk/*.apk 1> /dev/null 2>&1; then
             APK=$(ls ../out_apk/*.apk | head -n1)
             echo "Listing contents of $APK (top lines):"
             unzip -l "$APK" | sed -n '1,200p' || true
-            # Show adaptive icon xml if packaged
             unzip -p "$APK" "res/mipmap-anydpi-v26/ic_launcher.xml" 2>/dev/null | sed -n '1,200p' || true
             unzip -p "$APK" "res/drawable/launch_background.xml" 2>/dev/null | sed -n '1,200p' || true
           fi
