@@ -46,6 +46,10 @@ on:
           - "push"
           - "location"
           - "all"
+      BRANDING_URL:
+        description: "Public folder URL that contains icon_xxxhdpi.png and splash.png (optional)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -222,6 +226,62 @@ jobs:
           # Add Android platform and sync
           npx cap add android || true
           npx cap sync android
+
+      #################################################################
+      # 4.5 Apply branding assets from URL (if provided)
+      # (This is the ONLY change — copies icon/splash from public folder)
+      #################################################################
+      - name: Apply branding assets from URL (if provided)
+        shell: bash
+        working-directory: android
+        run: |
+          set -euo pipefail
+
+          BASE="${{ github.event.inputs.BRANDING_URL }}"
+          if [ -z "$BASE" ]; then
+            echo "BRANDING_URL not provided — skipping branding download"
+            exit 0
+          fi
+
+          # Ensure trailing slash
+          case "$BASE" in */) ;; *) BASE="$BASE/";; esac
+          echo "Downloading branding from: $BASE"
+
+          # download assets (ok if missing)
+          curl -sfSL "${BASE}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
+          curl -sfSL "${BASE}icon_xxhdpi.png"  -o /tmp/icon_xxhdpi.png  || true
+          curl -sfSL "${BASE}icon_xhdpi.png"   -o /tmp/icon_xhdpi.png   || true
+          curl -sfSL "${BASE}icon_hdpi.png"    -o /tmp/icon_hdpi.png    || true
+          curl -sfSL "${BASE}splash.png"       -o /tmp/splash.png       || true
+
+          # apply icons if present
+          if [ -f /tmp/icon_xxxhdpi.png ]; then
+            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
+            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
+            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
+            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
+            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
+          fi
+
+          # copy additional densities if present
+          if [ -f /tmp/icon_xxhdpi.png ]; then
+            cp /tmp/icon_xxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
+          fi
+          if [ -f /tmp/icon_xhdpi.png ]; then
+            cp /tmp/icon_xhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
+          fi
+          if [ -f /tmp/icon_hdpi.png ]; then
+            cp /tmp/icon_hdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
+          fi
+
+          # apply splash if present
+          if [ -f /tmp/splash.png ]; then
+            for folder in drawable drawable-hdpi drawable-xhdpi drawable-xxhdpi drawable-xxxhdpi; do
+              if [ -d "app/src/main/res/$folder" ]; then
+                cp /tmp/splash.png "app/src/main/res/$folder/splash.png" || true
+              fi
+            done
+          fi
 
       #################################################################
       # 5. Patch Gradle for versioning, SDK levels, signing
