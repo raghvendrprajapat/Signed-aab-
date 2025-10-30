@@ -229,7 +229,7 @@ jobs:
           npx cap sync android
 
       #################################################################
-      # 4.5 Apply branding assets from URL(s) (if provided)
+      # 4.5 Apply branding assets from URL(s) (if provided) -- UPDATED
       #################################################################
       - name: Apply branding assets from URL(s) (if provided)
         shell: bash
@@ -262,8 +262,14 @@ jobs:
             curl -sfSL "${SPLASH_SRC}splash.png" -o /tmp/splash.png || true
           fi
 
-          # apply icons if present
+          # create resource dirs if missing (safe)
+          mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
+
+          # apply icons if present (legacy mipmap)
           if [ -f /tmp/icon_xxxhdpi.png ]; then
+            echo "Copying legacy mipmap icons..."
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
@@ -282,14 +288,99 @@ jobs:
             cp /tmp/icon_hdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
           fi
 
-          # apply splash if present
-          if [ -f /tmp/splash.png ]; then
-            for folder in drawable drawable-hdpi drawable-xhdpi drawable-xxhdpi drawable-xxxhdpi; do
-              if [ -d "app/src/main/res/$folder" ]; then
-                cp /tmp/splash.png "app/src/main/res/$folder/splash.png" || true
-              fi
-            done
+          # --- adaptive icon: create foreground/background + xml that points to them ---
+          if [ -f /tmp/icon_xxxhdpi.png ]; then
+            echo "Creating adaptive icon foreground/background and XML..."
+            # use same image for foreground/background (simple). If you prefer separate BG, upload separate file.
+            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
+            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
+
+            cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+  <background android:drawable="@mipmap/ic_launcher_background"/>
+  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+</adaptive-icon>
+EOF
+
+            cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+  <background android:drawable="@mipmap/ic_launcher_background"/>
+  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
+</adaptive-icon>
+EOF
+            echo "Adaptive icon files written."
+          else
+            echo "No /tmp/icon_xxxhdpi.png found — adaptive icon not created."
           fi
+
+          # --- splash handling: put in drawable-nodpi and ensure launch_background references it ---
+          if [ -f /tmp/splash.png ]; then
+            echo "Installing splash image..."
+            cp /tmp/splash.png app/src/main/res/drawable-nodpi/splash.png || true
+
+            LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
+            if [ -f "$LAUNCH_XML" ]; then
+              # attempt to replace any existing bitmap line to point to our splash resource
+              if grep -q "android:src=\"@drawable/" "$LAUNCH_XML" 2>/dev/null; then
+                sed -i 's@android:src=\"@REPLACETMP@' "$LAUNCH_XML" || true
+              fi
+              # ensure it contains reference to @drawable/splash (best-effort)
+              if ! grep -q "@drawable/splash" "$LAUNCH_XML" 2>/dev/null; then
+                # fallback: overwrite with a simple layer-list that centers the splash
+                cat > "$LAUNCH_XML" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@android:color/white" />
+    <item>
+        <bitmap android:gravity="center" android:src="@drawable/splash" />
+    </item>
+</layer-list>
+EOF
+              fi
+            else
+              # create a simple launch_background.xml that centers splash.png
+              mkdir -p app/src/main/res/drawable
+              cat > "$LAUNCH_XML" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@android:color/white" />
+    <item>
+        <bitmap android:gravity="center" android:src="@drawable/splash" />
+    </item>
+</layer-list>
+EOF
+            fi
+            echo "Splash applied and launch_background updated/created."
+          else
+            echo "No /tmp/splash.png found — splash not applied."
+          fi
+
+          # --- Debug listing so we can confirm in Actions log ---
+          echo "=== DEBUG: /tmp files ==="
+          ls -l /tmp/icon_* /tmp/splash.png || true
+
+          echo "=== DEBUG: mipmap-anydpi-v26 ==="
+          ls -l app/src/main/res/mipmap-anydpi-v26 || true
+
+          echo "=== DEBUG: mipmap-* folders ==="
+          ls -l app/src/main/res/mipmap-* | sed -n '1,200p' || true
+
+          echo "=== DEBUG: drawable folders ==="
+          ls -l app/src/main/res/drawable* | sed -n '1,200p' || true
+
+          echo "=== DEBUG: ic_launcher.xml content (if present) ==="
+          if [ -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml ]; then
+            sed -n '1,200p' app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
+          fi
+
+          echo "=== DEBUG: launch_background.xml content (if present) ==="
+          if [ -f app/src/main/res/drawable/launch_background.xml ]; then
+            sed -n '1,200p' app/src/main/res/drawable/launch_background.xml || true
+          fi
+
+          echo "Branding step complete."
 
       #################################################################
       # 5. Patch Gradle for versioning, SDK levels, signing
