@@ -27,10 +27,6 @@ on:
         description: "Target / compile SDK"
         required: true
         default: "35"
-      MIN_SDK:
-        description: "Min SDK"
-        required: true
-        default: "22"
       ALLOW_MIXED_CONTENT:
         description: "Allow http:// content? true/false"
         required: true
@@ -70,7 +66,8 @@ jobs:
       VERSION_NAME: ${{ github.event.inputs.VERSION_NAME }}
       VERSION_CODE: ${{ github.event.inputs.VERSION_CODE }}
       TARGET_SDK: ${{ github.event.inputs.TARGET_SDK }}
-      MIN_SDK: ${{ github.event.inputs.MIN_SDK }}
+      # MIN_SDK removed from inputs due to GitHub limit; use default 22 here
+      MIN_SDK: "22"
       ALLOW_MIXED_CONTENT: ${{ github.event.inputs.ALLOW_MIXED_CONTENT }}
       PLUGINS: ${{ github.event.inputs.PLUGINS }}
 
@@ -232,38 +229,37 @@ jobs:
           npx cap sync android
 
       #################################################################
-      # 4.5 Apply branding assets from URL (if provided)
+      # 4.5 Apply branding assets from URL(s) (if provided)
       #################################################################
-      - name: Apply branding assets from URL (if provided)
+      - name: Apply branding assets from URL(s) (if provided)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
 
-          ICON_BASE="${{ github.event.inputs.APP_ICON_URL }}"
-          SPLASH_BASE="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
-          if [ -z "$ICON_BASE" ] && [ -z "$SPLASH_BASE" ]; then
+          ICON_SRC="${{ github.event.inputs.APP_ICON_URL }}"
+          SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
+
+          if [ -z "$ICON_SRC" ] && [ -z "$SPLASH_SRC" ]; then
             echo "No branding URLs provided — skipping branding download"
             exit 0
           fi
 
-          # Download icon assets if URL provided
-          if [ -n "$ICON_BASE" ]; then
-            # Ensure trailing slash
-            case "$ICON_BASE" in */) ;; *) ICON_BASE="$ICON_BASE/";; esac
-            echo "Downloading icon assets from: $ICON_BASE"
-            curl -sfSL "${ICON_BASE}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
-            curl -sfSL "${ICON_BASE}icon_xxhdpi.png" -o /tmp/icon_xxhdpi.png || true
-            curl -sfSL "${ICON_BASE}icon_xhdpi.png" -o /tmp/icon_xhdpi.png || true
-            curl -sfSL "${ICON_BASE}icon_hdpi.png" -o /tmp/icon_hdpi.png || true
+          # Normalize and download icon(s) if provided
+          if [ -n "$ICON_SRC" ]; then
+            case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
+            echo "Downloading icons from: $ICON_SRC"
+            curl -sfSL "${ICON_SRC}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
+            curl -sfSL "${ICON_SRC}icon_xxhdpi.png"  -o /tmp/icon_xxhdpi.png  || true
+            curl -sfSL "${ICON_SRC}icon_xhdpi.png"   -o /tmp/icon_xhdpi.png   || true
+            curl -sfSL "${ICON_SRC}icon_hdpi.png"    -o /tmp/icon_hdpi.png    || true
           fi
 
-          # Download splash asset if URL provided
-          if [ -n "$SPLASH_BASE" ]; then
-            # Ensure trailing slash
-            case "$SPLASH_BASE" in */) ;; *) SPLASH_BASE="$SPLASH_BASE/";; esac
-            echo "Downloading splash from: $SPLASH_BASE"
-            curl -sfSL "${SPLASH_BASE}splash.png" -o /tmp/splash.png || true
+          # Normalize and download splash if provided
+          if [ -n "$SPLASH_SRC" ]; then
+            case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac
+            echo "Downloading splash from: $SPLASH_SRC"
+            curl -sfSL "${SPLASH_SRC}splash.png" -o /tmp/splash.png || true
           fi
 
           # apply icons if present
@@ -315,11 +311,14 @@ jobs:
           echo "Patching $FILE"
 
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
-          sed -i -E "s/versionName[ =]+\\\"[^\\"]+\\\"/versionName \\\"$VERSION_NAME\\\"/" "$FILE" || true
+          sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
+
           sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE" || true
           sed -i -E "s/minSdk[ =]+[0-9]+/minSdk $MIN_SDK/" "$FILE" || true
+
           sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/targetSdk[ =]+[0-9]+/targetSdk $TARGET_SDK/" "$FILE" || true
+
           sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
 
@@ -329,10 +328,10 @@ jobs:
               echo "android {"
               echo "    signingConfigs {"
               echo "        release {"
-              echo "            storeFile file(\\"release.keystore\\")"
-              echo "            storePassword System.getenv(\\"KEYSTORE_PASSWORD\\")"
-              echo "            keyAlias      System.getenv(\\"KEY_ALIAS\\")"
-              echo "            keyPassword   System.getenv(\\"KEY_PASSWORD\\")"
+              echo "            storeFile file(\"release.keystore\")"
+              echo "            storePassword System.getenv(\"KEYSTORE_PASSWORD\")"
+              echo "            keyAlias      System.getenv(\"KEY_ALIAS\")"
+              echo "            keyPassword   System.getenv(\"KEY_PASSWORD\")"
               echo "        }"
               echo "    }"
               echo "    buildTypes {"
