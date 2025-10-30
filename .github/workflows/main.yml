@@ -50,6 +50,14 @@ on:
         description: "Public folder URL that contains icon_xxxhdpi.png and splash.png (optional)"
         required: false
         default: ""
+      ICON_URL:
+        description: "Direct public URL to app icon PNG (optional) — overrides BRANDING_URL icon"
+        required: false
+        default: ""
+      SPLASH_URL:
+        description: "Direct public URL to splash PNG (optional) — overrides BRANDING_URL splash"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -69,6 +77,10 @@ jobs:
       MIN_SDK: ${{ github.event.inputs.MIN_SDK }}
       ALLOW_MIXED_CONTENT: ${{ github.event.inputs.ALLOW_MIXED_CONTENT }}
       PLUGINS: ${{ github.event.inputs.PLUGINS }}
+
+      ICON_URL: ${{ github.event.inputs.ICON_URL }}
+      SPLASH_URL: ${{ github.event.inputs.SPLASH_URL }}
+      BRANDING_URL: ${{ github.event.inputs.BRANDING_URL }}
 
       # secrets (must exist in repo → Settings → Secrets and variables → Actions)
       KEYSTORE_BASE64:   ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -228,59 +240,61 @@ jobs:
           npx cap sync android
 
       #################################################################
-      # 4.5 Apply branding assets from URL (if provided)
-      # (This is the ONLY change — copies icon/splash from public folder)
+      # 4.5 Apply icon and splash from separate URLs (if provided)
+      # (Supports ICON_URL/SPLASH_URL; falls back to BRANDING_URL if given)
       #################################################################
-      - name: Apply branding assets from URL (if provided)
+      - name: Apply branding assets from ICON_URL/SPLASH_URL or BRANDING_URL
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
 
+          ICON_URL="${{ github.event.inputs.ICON_URL }}"
+          SPLASH_URL="${{ github.event.inputs.SPLASH_URL }}"
           BASE="${{ github.event.inputs.BRANDING_URL }}"
-          if [ -z "$BASE" ]; then
-            echo "BRANDING_URL not provided — skipping branding download"
-            exit 0
+
+          # normalize BASE trailing slash if provided
+          if [ -n "$BASE" ]; then
+            case "$BASE" in */) ;; *) BASE="$BASE/";; esac
           fi
 
-          # Ensure trailing slash
-          case "$BASE" in */) ;; *) BASE="$BASE/";; esac
-          echo "Downloading branding from: $BASE"
+          echo "Branding inputs - ICON_URL:'${ICON_URL:-}' SPLASH_URL:'${SPLASH_URL:-}' BRANDING_URL:'${BASE:-}'"
 
-          # download assets (ok if missing)
-          curl -sfSL "${BASE}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
-          curl -sfSL "${BASE}icon_xxhdpi.png"  -o /tmp/icon_xxhdpi.png  || true
-          curl -sfSL "${BASE}icon_xhdpi.png"   -o /tmp/icon_xhdpi.png   || true
-          curl -sfSL "${BASE}icon_hdpi.png"    -o /tmp/icon_hdpi.png    || true
-          curl -sfSL "${BASE}splash.png"       -o /tmp/splash.png       || true
-
-          # apply icons if present
-          if [ -f /tmp/icon_xxxhdpi.png ]; then
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
+          # download icon: priority ICON_URL -> BASE/icon_xxxhdpi.png
+          if [ -n "$ICON_URL" ]; then
+            curl -sfSL "$ICON_URL" -o /tmp/app_icon.png || true
+          elif [ -n "$BASE" ]; then
+            curl -sfSL "${BASE}icon_xxxhdpi.png" -o /tmp/app_icon.png || true
           fi
 
-          # copy additional densities if present
-          if [ -f /tmp/icon_xxhdpi.png ]; then
-            cp /tmp/icon_xxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
-          fi
-          if [ -f /tmp/icon_xhdpi.png ]; then
-            cp /tmp/icon_xhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
-          fi
-          if [ -f /tmp/icon_hdpi.png ]; then
-            cp /tmp/icon_hdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
-          fi
-
-          # apply splash if present
-          if [ -f /tmp/splash.png ]; then
-            for folder in drawable drawable-hdpi drawable-xhdpi drawable-xxhdpi drawable-xxxhdpi; do
-              if [ -d "app/src/main/res/$folder" ]; then
-                cp /tmp/splash.png "app/src/main/res/$folder/splash.png" || true
-              fi
+          if [ -f /tmp/app_icon.png ]; then
+            echo "Applying downloaded icon to mipmap folders"
+            for density in xxxhdpi xxhdpi xhdpi hdpi; do
+              dst="app/src/main/res/mipmap-$density"
+              mkdir -p "$dst"
+              cp /tmp/app_icon.png "$dst/ic_launcher.png" || true
+              cp /tmp/app_icon.png "$dst/ic_launcher_round.png" || true
             done
+          else
+            echo "No icon downloaded; skipping icon replacement"
+          fi
+
+          # download splash: priority SPLASH_URL -> BASE/splash.png
+          if [ -n "$SPLASH_URL" ]; then
+            curl -sfSL "$SPLASH_URL" -o /tmp/app_splash.png || true
+          elif [ -n "$BASE" ]; then
+            curl -sfSL "${BASE}splash.png" -o /tmp/app_splash.png || true
+          fi
+
+          if [ -f /tmp/app_splash.png ]; then
+            echo "Applying downloaded splash to drawable folders"
+            for folder in drawable drawable-hdpi drawable-xhdpi drawable-xxhdpi drawable-xxxhdpi; do
+              dst="app/src/main/res/$folder"
+              mkdir -p "$dst"
+              cp /tmp/app_splash.png "$dst/splash.png" || true
+            done
+          else
+            echo "No splash downloaded; skipping splash replacement"
           fi
 
       #################################################################
