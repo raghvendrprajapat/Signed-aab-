@@ -43,11 +43,11 @@ on:
           - "location"
           - "all"
       APP_ICON_URL:
-        description: "Public URL (file or folder) for app icon PNG (optional)"
+        description: "Public folder URL that contains app icon PNGs (optional)"
         required: false
         default: ""
       SPLASH_SCREEN_URL:
-        description: "Public URL (file or folder) for splash PNG (optional)"
+        description: "Public folder URL for splash screen PNG (optional)"
         required: false
         default: ""
 
@@ -66,10 +66,12 @@ jobs:
       VERSION_NAME: ${{ github.event.inputs.VERSION_NAME }}
       VERSION_CODE: ${{ github.event.inputs.VERSION_CODE }}
       TARGET_SDK: ${{ github.event.inputs.TARGET_SDK }}
+      # MIN_SDK removed from inputs due to GitHub limit; use default 22 here
       MIN_SDK: "22"
       ALLOW_MIXED_CONTENT: ${{ github.event.inputs.ALLOW_MIXED_CONTENT }}
       PLUGINS: ${{ github.event.inputs.PLUGINS }}
 
+      # secrets (must exist in repo → Settings → Secrets and variables → Actions)
       KEYSTORE_BASE64:   ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
@@ -79,6 +81,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # use Java 21 (Capacitor/Gradle wants source release 21)
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -90,19 +93,28 @@ jobs:
         with:
           node-version: 20
 
+      #################################################################
+      # 1. Prepare webDir (works with OR without package.json)
+      #################################################################
       - name: Prepare webDir
         shell: bash
         run: |
           set -euo pipefail
+
+          # if repo is already a web project
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then
               npm ci
             else
               npm install
             fi
+
+            # build if build script exists
             if npm run | grep -q " build"; then
               npm run build || true
             fi
+
+            # try common build folders
             for d in dist build public; do
               if [ -d "$d" ]; then
                 echo "WEB_BUILD_DIR=$d" >> $GITHUB_ENV
@@ -110,32 +122,54 @@ jobs:
               fi
             done
           fi
+
+          # if still no WEB_BUILD_DIR => create minimal html
           if ! grep -q WEB_BUILD_DIR $GITHUB_ENV 2>/dev/null; then
             mkdir -p minimal_www
             printf '<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:2rem;">Loading…</body></html>\n' > minimal_www/index.html
             echo "WEB_BUILD_DIR=minimal_www" >> $GITHUB_ENV
           fi
+
+          # make sure capacitor deps exist
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
+      #################################################################
+      # 2. Validate inputs + secrets before wasting time
+      #################################################################
       - name: Validate inputs
         shell: bash
         run: |
           set -euo pipefail
+
+          # APP_ID format check
           if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
-            echo "❌ APP_ID invalid: $APP_ID"; exit 1
+            echo "❌ APP_ID invalid: $APP_ID"
+            exit 1
           fi
+
+          # VERSION_CODE must be integer
           if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
-            echo "❌ VERSION_CODE must be integer"; exit 1
+            echo "❌ VERSION_CODE must be integer"
+            exit 1
           fi
+
+          # HTTPS rule unless ALLOW_MIXED_CONTENT=true
           if [[ "$ALLOW_MIXED_CONTENT" != "true" && ! "$WEB_URL" =~ ^https:// ]]; then
-            echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"; exit 1
+            echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"
+            exit 1
           fi
+
+          # secrets exist?
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then
-              echo "❌ Missing secret: $var"; exit 1
+              echo "❌ Missing secret: $var"
+              exit 1
             fi
           done
 
+      #################################################################
+      # 3. Restore keystore from Base64
+      #################################################################
       - name: Restore keystore
         shell: bash
         run: |
@@ -143,12 +177,20 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
           ls -l android.keystore
 
+      #################################################################
+      # 4. Init Capacitor project and generate capacitor.config.json
+      #################################################################
       - name: Configure Capacitor
         shell: bash
         run: |
           set -euo pipefail
+
           echo "WEB_BUILD_DIR currently set to: $WEB_BUILD_DIR"
+
+          # Init Capacitor (no --npm-client flag because older CLI doesn't like it)
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
+
+          # Generate capacitor.config.json (not .ts, so no TypeScript needed)
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
           printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
@@ -170,6 +212,8 @@ jobs:
           fi
           printf '  }\n' >> capacitor.config.json
           printf '}\n' >> capacitor.config.json
+
+          # Install optional plugins
           if [ "$PLUGINS" = "camera" ]; then
             npm install @capacitor/camera
           elif [ "$PLUGINS" = "push" ]; then
@@ -179,10 +223,15 @@ jobs:
           elif [ "$PLUGINS" = "all" ]; then
             npm install @capacitor/camera @capacitor/push-notifications @capacitor/geolocation
           fi
+
+          # Add Android platform and sync
           npx cap add android || true
           npx cap sync android
 
-      - name: Apply branding assets (robust; flattens foreground to avoid transparent/blank icons)
+      #################################################################
+      # 4.5 Apply branding assets from URL(s) (robust & fixed)
+      #################################################################
+      - name: Apply branding assets from URL(s) (robust & fixed)
         shell: bash
         working-directory: android
         run: |
@@ -192,156 +241,157 @@ jobs:
           SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
 
           if [ -z "$ICON_SRC" ] && [ -z "$SPLASH_SRC" ]; then
-            echo "No branding provided — skip"; exit 0
+            echo "No branding URLs provided — skipping branding download"
+            exit 0
           fi
 
+          # install ImageMagick for resizing/flattening
           sudo apt-get update -y
           sudo apt-get install -y imagemagick || true
 
-          if [ -n "$ICON_SRC" ]; then
-            case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
-            curl -sfSL "${ICON_SRC}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
-            curl -sfSL "${ICON_SRC}icon_xxhdpi.png"  -o /tmp/icon_xxhdpi.png  || true
-            curl -sfSL "${ICON_SRC}icon_xhdpi.png"   -o /tmp/icon_xhdpi.png   || true
-            curl -sfSL "${ICON_SRC}icon_hdpi.png"    -o /tmp/icon_hdpi.png    || true
-            if [ ! -f /tmp/icon_xxxhdpi.png ]; then
-              curl -sfSL "${ICON_SRC%/}" -o /tmp/icon_xxxhdpi.png || true
-            fi
-          fi
-
-          if [ -n "$SPLASH_SRC" ]; then
-            case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac
-            curl -sfSL "${SPLASH_SRC}splash.png" -o /tmp/splash.png || true
-            if [ ! -f /tmp/splash.png ]; then
-              curl -sfSL "${SPLASH_SRC%/}" -o /tmp/splash.png || true
-            fi
-          fi
-
-          echo "Removing potential conflicting launcher/splash resources..."
-          rm -f app/src/main/res/mipmap-*/ic_launcher* || true
-          rm -f app/src/main/res/mipmap-anydpi-v26/* || true
-          rm -f app/src/main/res/drawable/ic_launcher_background* || true
-          rm -f app/src/main/res/drawable-nodpi/splash.png || true
-          rm -f app/src/main/res/drawable/launch_background.xml || true
-
-          mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
-          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          # ensure resource dirs exist
+          mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
 
-          ICON_SOURCE=""
-          if [ -f /tmp/icon_xxxhdpi.png ]; then ICON_SOURCE="/tmp/icon_xxxhdpi.png"; fi
-          if [ -f /tmp/icon_xxhdpi.png ]; then ICON_SOURCE="/tmp/icon_xxhdpi.png"; fi
-          if [ -f /tmp/icon_xhdpi.png ]; then ICON_SOURCE="/tmp/icon_xhdpi.png"; fi
-          if [ -f /tmp/icon_hdpi.png ]; then ICON_SOURCE="/tmp/icon_hdpi.png"; fi
+          # remove possible old files that cause duplicate resource errors (best-effort)
+          rm -f app/src/main/res/mipmap-anydpi-v26/ic_launcher* app/src/main/res/mipmap-*/ic_launcher* app/src/main/res/drawable/launch_background.xml app/src/main/res/drawable-nodpi/splash.png || true
 
-          if [ -n "$ICON_SOURCE" ]; then
-            echo "Using icon source: $ICON_SOURCE"
-            convert "$ICON_SOURCE" -auto-orient -resize 1024x1024^ -gravity center -background none -extent 1024x1024 /tmp/icon_base.png || true
+          # helper to download and flatten/resize icon into densities
+          if [ -n "$ICON_SRC" ]; then
+            case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
+            echo "Downloading icons from: $ICON_SRC"
 
-            # compute avg color fallback
-            AVG_COLOR=$(convert /tmp/icon_base.png -scale 1x1\! -format "%[pixel:p{0,0}]" info:- 2>/dev/null || echo "white")
-            echo "Average color detected: $AVG_COLOR"
+            # prefer full-size xxxhdpi if provided, else try direct file
+            curl -sfSL "${ICON_SRC}icon_xxxhdpi.png" -o /tmp/icon_src.png || curl -sfSL "${ICON_SRC}icon.png" -o /tmp/icon_src.png || true
 
-            # create foreground and then FLATTEN to opaque background to avoid transparent foreground
-            convert /tmp/icon_base.png -resize 432x432 /tmp/ic_foreground.png || true
-            convert /tmp/ic_foreground.png -background white -alpha remove -alpha off /tmp/ic_foreground_flat.png || true
+            if [ -f /tmp/icon_src.png ]; then
+              echo "Found source icon at /tmp/icon_src.png — processing..."
 
-            # create background using average color and subtle blur composite
-            convert -size 1024x1024 "xc:${AVG_COLOR}" /tmp/ic_background_base.png || true
-            convert /tmp/icon_base.png -resize 1200x1200 -gravity center -blur 0x50 -modulate 100,0 -alpha set -channel A -evaluate set 20% /tmp/icon_blur.png || true
-            composite -gravity center -dissolve 15 /tmp/icon_blur.png /tmp/ic_background_base.png /tmp/ic_background.png || true
+              # convert: flatten alpha to white (avoid blank launcher icons), then create densities
+              convert /tmp/icon_src.png -background white -alpha remove -alpha off /tmp/icon_flat.png || cp /tmp/icon_src.png /tmp/icon_flat.png || true
 
-            # create mipmap sizes from flattened foreground (legacy)
-            convert /tmp/icon_base.png -resize 192x192 /tmp/icon_xxxhdpi.png || true
-            convert /tmp/icon_base.png -resize 144x144 /tmp/icon_xxhdpi.png  || true
-            convert /tmp/icon_base.png -resize 96x96   /tmp/icon_xhdpi.png   || true
-            convert /tmp/icon_base.png -resize 72x72   /tmp/icon_hdpi.png    || true
+              # resize for densities: xxxhdpi=192, xxhdpi=144, xhdpi=96, hdpi=72 (typical)
+              convert /tmp/icon_flat.png -resize 192x192\> /tmp/icon_xxxhdpi.png || true
+              convert /tmp/icon_flat.png -resize 144x144\> /tmp/icon_xxhdpi.png  || true
+              convert /tmp/icon_flat.png -resize 96x96\>   /tmp/icon_xhdpi.png   || true
+              convert /tmp/icon_flat.png -resize 72x72\>   /tmp/icon_hdpi.png    || true
 
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
-            cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
-            cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
-            cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher.png || true
+              # copy into mipmap folders
+              cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
+              cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
+              cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
+              cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
+              cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher.png || true
 
-            # use FLATTENED foreground for adaptive icon
-            cp /tmp/ic_foreground_flat.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
-            cp /tmp/ic_background.png app/src/main/res/drawable/ic_launcher_background.png || true
+              # create adaptive icon foreground/background images in anydpi-v26
+              cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
+              # create a simple background: use flattened image as background too (or a white bg if you prefer)
+              cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
 
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
-              '  <background android:drawable="@drawable/ic_launcher_background"/>' \
-              '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
-              '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
+              # write adaptive XML files (overwrite safely)
+              printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+                '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+                '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
+                '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
+                '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
 
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
-              '  <background android:drawable="@drawable/ic_launcher_background"/>' \
-              '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
-              '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
+              printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+                '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+                '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
+                '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
+                '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
 
-            echo "Icon assets created and written."
-          else
-            echo "No icon downloaded; skipping icon creation."
+              echo "Icon densities and adaptive xml created."
+            else
+              echo "No icon image found at ${ICON_SRC}* (skipping icons)."
+            fi
           fi
 
-          # SPLASH handling
-          if [ -f /tmp/splash.png ]; then
-            cp /tmp/splash.png app/src/main/res/drawable-nodpi/splash.png || true
-            LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
-            mkdir -p app/src/main/res/drawable
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' \
-              '  <item android:drawable="@android:color/white" />' \
-              '  <item>' \
-              '    <bitmap android:gravity="center" android:src="@drawable/splash" />' \
-              '  </item>' \
-              '</layer-list>' > "$LAUNCH_XML" || true
-            echo "Splash image applied and launch_background.xml created."
-          else
-            echo "No splash downloaded; skipping splash."
+          # handle splash image: download, flatten if alpha, place in drawable-nodpi and ensure launch_background references it
+          if [ -n "$SPLASH_SRC" ]; then
+            case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac
+            echo "Downloading splash from: $SPLASH_SRC"
+            curl -sfSL "${SPLASH_SRC}splash.png" -o /tmp/splash_src.png || curl -sfSL "${SPLASH_SRC}splash.png" -o /tmp/splash_src.png || true
+
+            if [ -f /tmp/splash_src.png ]; then
+              # flatten alpha to white to avoid transparent empty screens on some launchers
+              convert /tmp/splash_src.png -background white -alpha remove -alpha off /tmp/splash_flat.png || cp /tmp/splash_src.png /tmp/splash_flat.png || true
+              # copy to drawable-nodpi
+              cp /tmp/splash_flat.png app/src/main/res/drawable-nodpi/splash.png || true
+
+              # ensure launch_background.xml references @drawable/splash (create or overwrite)
+              LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
+              mkdir -p app/src/main/res/drawable
+              printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+                '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' \
+                '    <item android:drawable="@android:color/white" />' \
+                '    <item>' \
+                '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
+                '    </item>' \
+                '</layer-list>' > "$LAUNCH_XML" || true
+
+              echo "Splash applied and launch_background created/updated."
+            else
+              echo "No splash image found at ${SPLASH_SRC}* (skipping splash)."
+            fi
           fi
 
-          # sync (non-fatal)
-          npx cap sync android || true
-
-          # debug output
+          # Debug listing so we can inspect results in Actions logs
           echo "=== DEBUG: /tmp files ==="
-          ls -l /tmp/icon_* /tmp/ic_* /tmp/splash.png || true
+          ls -l /tmp/icon* /tmp/splash* || true
 
           echo "=== DEBUG: mipmap-anydpi-v26 ==="
           ls -l app/src/main/res/mipmap-anydpi-v26 || true
 
-          echo "=== DEBUG: mipmap-* folders ==="
+          echo "=== DEBUG: mipmap-* folders (show first 200 lines) ==="
           ls -l app/src/main/res/mipmap-* | sed -n '1,200p' || true
 
           echo "=== DEBUG: drawable folders ==="
           ls -l app/src/main/res/drawable* | sed -n '1,200p' || true
 
+          echo "=== DEBUG: ic_launcher.xml content (if present) ==="
           if [ -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml ]; then
-            echo "=== ic_launcher.xml ==="
             sed -n '1,200p' app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
           fi
+
+          echo "=== DEBUG: launch_background.xml content (if present) ==="
           if [ -f app/src/main/res/drawable/launch_background.xml ]; then
-            echo "=== launch_background.xml ==="
             sed -n '1,200p' app/src/main/res/drawable/launch_background.xml || true
           fi
-          echo "Branding step finished."
 
+          echo "Branding step complete."
+
+      #################################################################
+      # 5. Patch Gradle for versioning, SDK levels, signing
+      #################################################################
       - name: Patch Gradle
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
+
           cp ../android.keystore app/release.keystore
-          if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
+
+          if [ -f app/build.gradle ]; then
+            FILE="app/build.gradle"
+          else
+            FILE="app/build.gradle.kts"
+          fi
+
+          echo "Patching $FILE"
+
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
           sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
+
           sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE" || true
           sed -i -E "s/minSdk[ =]+[0-9]+/minSdk $MIN_SDK/" "$FILE" || true
+
           sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/targetSdk[ =]+[0-9]+/targetSdk $TARGET_SDK/" "$FILE" || true
+
           sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
+
           if ! grep -q "signingConfigs" "$FILE"; then
             {
               echo ""
@@ -365,6 +415,7 @@ jobs:
               echo "}"
             } >> "$FILE"
           fi
+
           if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then
             MF="app/src/main/AndroidManifest.xml"
             if [ -f "$MF" ]; then
@@ -374,17 +425,28 @@ jobs:
             fi
           fi
 
+      #################################################################
+      # 6. Build release AAB+APK and upload artifacts separately
+      #################################################################
       - name: Build release
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
           ./gradlew clean :app:bundleRelease :app:assembleRelease
-          mkdir -p ../out_aab ../out_apk
+
+          # make output folders
+          mkdir -p ../out_aab
+          mkdir -p ../out_apk
+
+          # copy built files
           cp app/build/outputs/bundle/release/*.aab ../out_aab/ || true
           cp app/build/outputs/apk/release/*.apk ../out_apk/   || true
-          echo "=== AAB files ==="; ls -l ../out_aab || true
-          echo "=== APK files ==="; ls -l ../out_apk || true
+
+          echo "=== AAB files ==="
+          ls -l ../out_aab || true
+          echo "=== APK files ==="
+          ls -l ../out_apk || true
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
