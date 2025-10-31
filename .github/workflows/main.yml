@@ -66,7 +66,7 @@ jobs:
       VERSION_NAME: ${{ github.event.inputs.VERSION_NAME }}
       VERSION_CODE: ${{ github.event.inputs.VERSION_CODE }}
       TARGET_SDK: ${{ github.event.inputs.TARGET_SDK }}
-      # MIN_SDK kept as default 22
+      # MIN_SDK removed from inputs to keep under 10 inputs; default used:
       MIN_SDK: "22"
       ALLOW_MIXED_CONTENT: ${{ github.event.inputs.ALLOW_MIXED_CONTENT }}
       PLUGINS: ${{ github.event.inputs.PLUGINS }}
@@ -81,6 +81,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # use Java 21 (Capacitor/Gradle wants source release 21)
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -100,6 +101,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # if repo is already a web project
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then
               npm ci
@@ -107,10 +109,12 @@ jobs:
               npm install
             fi
 
+            # build if build script exists
             if npm run | grep -q " build"; then
               npm run build || true
             fi
 
+            # try common build folders
             for d in dist build public; do
               if [ -d "$d" ]; then
                 echo "WEB_BUILD_DIR=$d" >> $GITHUB_ENV
@@ -119,12 +123,14 @@ jobs:
             done
           fi
 
+          # if still no WEB_BUILD_DIR => create minimal html
           if ! grep -q WEB_BUILD_DIR $GITHUB_ENV 2>/dev/null; then
             mkdir -p minimal_www
             printf '<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:2rem;">Loading…</body></html>\n' > minimal_www/index.html
             echo "WEB_BUILD_DIR=minimal_www" >> $GITHUB_ENV
           fi
 
+          # make sure capacitor deps exist
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
       #################################################################
@@ -135,21 +141,25 @@ jobs:
         run: |
           set -euo pipefail
 
+          # APP_ID format check
           if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
             echo "❌ APP_ID invalid: $APP_ID"
             exit 1
           fi
 
+          # VERSION_CODE must be integer
           if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
             echo "❌ VERSION_CODE must be integer"
             exit 1
           fi
 
+          # HTTPS rule unless ALLOW_MIXED_CONTENT=true
           if [[ "$ALLOW_MIXED_CONTENT" != "true" && ! "$WEB_URL" =~ ^https:// ]]; then
             echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"
             exit 1
           fi
 
+          # secrets exist?
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then
               echo "❌ Missing secret: $var"
@@ -174,9 +184,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           echo "WEB_BUILD_DIR currently set to: $WEB_BUILD_DIR"
+
+          # Init Capacitor (no --npm-client flag because older CLI doesn't like it)
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
 
+          # Generate capacitor.config.json (not .ts, so no TypeScript needed)
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
           printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
@@ -199,6 +213,7 @@ jobs:
           printf '  }\n' >> capacitor.config.json
           printf '}\n' >> capacitor.config.json
 
+          # Install optional plugins
           if [ "$PLUGINS" = "camera" ]; then
             npm install @capacitor/camera
           elif [ "$PLUGINS" = "push" ]; then
@@ -209,14 +224,14 @@ jobs:
             npm install @capacitor/camera @capacitor/push-notifications @capacitor/geolocation
           fi
 
+          # Add Android platform and sync
           npx cap add android || true
           npx cap sync android
 
       #################################################################
-      # 4.5 Apply branding assets from URL(s) (if provided) + ImageMagick
-      # This step converts input PNG to proper square icons and adaptive
+      # 4.5 Apply branding assets from URL(s) (robust)
       #################################################################
-      - name: Apply branding assets from URL(s) (if provided)
+      - name: Apply branding assets from URL(s) (robust)
         shell: bash
         working-directory: android
         run: |
@@ -230,36 +245,33 @@ jobs:
             exit 0
           fi
 
-          # install imagemagick for processing icons
+          # install ImageMagick for image processing
           sudo apt-get update -y
           sudo apt-get install -y imagemagick || true
 
-          # normalize icon src / splash src (allow either folder or direct file URL)
+          # Normalize and download icon(s)
           if [ -n "$ICON_SRC" ]; then
             case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
-            echo "Downloading icons from: $ICON_SRC"
             curl -sfSL "${ICON_SRC}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
             curl -sfSL "${ICON_SRC}icon_xxhdpi.png"  -o /tmp/icon_xxhdpi.png  || true
             curl -sfSL "${ICON_SRC}icon_xhdpi.png"   -o /tmp/icon_xhdpi.png   || true
             curl -sfSL "${ICON_SRC}icon_hdpi.png"    -o /tmp/icon_hdpi.png    || true
-            # fallback: if user supplied direct file URL (not folder), try downloading that single file
+            # if folder didn't contain these, try ICON_SRC as direct file
             if [ ! -f /tmp/icon_xxxhdpi.png ]; then
-              echo "Trying ICON_SRC as direct file: ${ICON_SRC%/}"
               curl -sfSL "${ICON_SRC%/}" -o /tmp/icon_xxxhdpi.png || true
             fi
           fi
 
+          # Normalize and download splash
           if [ -n "$SPLASH_SRC" ]; then
             case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac
-            echo "Downloading splash from: $SPLASH_SRC"
             curl -sfSL "${SPLASH_SRC}splash.png" -o /tmp/splash.png || true
             if [ ! -f /tmp/splash.png ]; then
-              echo "Trying SPLASH_SRC as direct file: ${SPLASH_SRC%/}"
               curl -sfSL "${SPLASH_SRC%/}" -o /tmp/splash.png || true
             fi
           fi
 
-          # choose source icon to process (prefer the xxxhdpi if present, else any downloaded)
+          # pick best icon
           ICON_SOURCE=""
           if [ -f /tmp/icon_xxxhdpi.png ]; then
             ICON_SOURCE="/tmp/icon_xxxhdpi.png"
@@ -271,49 +283,40 @@ jobs:
             ICON_SOURCE="/tmp/icon_hdpi.png"
           fi
 
-          # If a source exists, create properly sized square icons + adaptive foreground
-          if [ -n "$ICON_SOURCE" ]; then
-            echo "Processing icon with ImageMagick from $ICON_SOURCE"
+          # create resource dirs if missing (safe)
+          mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
 
-            # create a square centered base (1024x1024) preserving transparency
+          if [ -n "$ICON_SOURCE" ]; then
+            echo "Processing icon: $ICON_SOURCE"
+            # create square base (1024) preserving transparency
             convert "$ICON_SOURCE" -resize 1024x1024^ -gravity center -background none -extent 1024x1024 /tmp/icon_base.png || true
 
-            # generate densities: xxxhdpi=192, xxhdpi=144, xhdpi=96, hdpi=72
+            # generate densities
             convert /tmp/icon_base.png -resize 192x192 /tmp/icon_xxxhdpi.png || true
             convert /tmp/icon_base.png -resize 144x144 /tmp/icon_xxhdpi.png || true
             convert /tmp/icon_base.png -resize 96x96   /tmp/icon_xhdpi.png  || true
             convert /tmp/icon_base.png -resize 72x72   /tmp/icon_hdpi.png   || true
 
-            # create adaptive foreground (centered, recommended size 432x432)
+            # create adaptive foreground (centered)
             convert /tmp/icon_base.png -resize 432x432 /tmp/ic_launcher_foreground.png || true
-          else
-            echo "No icon source to process."
-          fi
 
-          # create resource dirs (safe)
-          mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
-          mkdir -p app/src/main/res/mipmap-anydpi-v26
-          mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
+            # create a white background for adaptive icon (avoid fully transparent background)
+            convert -size 432x432 xc:white /tmp/ic_launcher_background.png || true
 
-          # copy processed (or downloaded) icons to proper places
-          if [ -f /tmp/icon_xxxhdpi.png ]; then
+            # copy files into resources
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
             cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
             cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
             cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher.png || true
-          fi
 
-          # copy adaptive foreground if created
-          if [ -f /tmp/ic_launcher_foreground.png ]; then
+            # put adaptive assets
             cp /tmp/ic_launcher_foreground.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
-            # create a simple white background drawable for adaptive icon
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">' \
-              '  <solid android:color="#FFFFFF"/>' \
-              '</shape>' > app/src/main/res/drawable/ic_launcher_background.xml || true
+            cp /tmp/ic_launcher_background.png app/src/main/res/drawable/ic_launcher_background.png || true
 
-            # adaptive icon xml
+            # write adaptive xmls in a safe way
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
               '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
               '  <background android:drawable="@drawable/ic_launcher_background"/>' \
@@ -325,48 +328,58 @@ jobs:
               '  <background android:drawable="@drawable/ic_launcher_background"/>' \
               '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
               '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
+
+            echo "Icon processing done."
+          else
+            echo "No icon file found to process."
           fi
 
-          # --- splash handling ---
+          # splash
           if [ -f /tmp/splash.png ]; then
             echo "Installing splash image..."
             cp /tmp/splash.png app/src/main/res/drawable-nodpi/splash.png || true
 
             LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
-            if [ -f "$LAUNCH_XML" ]; then
-              if ! grep -q "@drawable/splash" "$LAUNCH_XML" 2>/dev/null; then
-                printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-                  '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' \
-                  '    <item android:drawable="@android:color/white" />' \
-                  '    <item>' \
-                  '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
-                  '    </item>' \
-                  '</layer-list>' > "$LAUNCH_XML" || true
-              fi
-            else
-              mkdir -p app/src/main/res/drawable
-              printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-                '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' \
-                '    <item android:drawable="@android:color/white" />' \
-                '    <item>' \
-                '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
-                '    </item>' \
-                '</layer-list>' > "$LAUNCH_XML" || true
-            fi
-            echo "Splash applied and launch_background updated/created."
+            mkdir -p app/src/main/res/drawable
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+              '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' \
+              '  <item android:drawable="@android:color/white" />' \
+              '  <item>' \
+              '    <bitmap android:gravity="center" android:src="@drawable/splash" />' \
+              '  </item>' \
+              '</layer-list>' > "$LAUNCH_XML" || true
+
+            echo "Splash updated."
           else
-            echo "No /tmp/splash.png found — splash not applied."
+            echo "No splash image."
           fi
 
-          # debug info
+          # ensure cap sync (best effort)
+          npx cap sync android || true
+
+          # debug outputs to confirm
           echo "=== DEBUG: /tmp files ==="
-          ls -l /tmp/icon_* /tmp/ic_launcher_foreground.png /tmp/splash.png || true
+          ls -l /tmp/icon_* /tmp/splash.png || true
+
           echo "=== DEBUG: mipmap-anydpi-v26 ==="
           ls -l app/src/main/res/mipmap-anydpi-v26 || true
+
           echo "=== DEBUG: mipmap-* folders ==="
           ls -l app/src/main/res/mipmap-* | sed -n '1,200p' || true
+
           echo "=== DEBUG: drawable folders ==="
           ls -l app/src/main/res/drawable* | sed -n '1,200p' || true
+
+          echo "=== DEBUG: ic_launcher.xml content (if present) ==="
+          if [ -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml ]; then
+            sed -n '1,200p' app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
+          fi
+
+          echo "=== DEBUG: launch_background.xml content (if present) ==="
+          if [ -f app/src/main/res/drawable/launch_background.xml ]; then
+            sed -n '1,200p' app/src/main/res/drawable/launch_background.xml || true
+          fi
+
           echo "Branding step complete."
 
       #################################################################
@@ -377,6 +390,7 @@ jobs:
         working-directory: android
         run: |
           set -euo pipefail
+
           cp ../android.keystore app/release.keystore
 
           if [ -f app/build.gradle ]; then
@@ -442,9 +456,11 @@ jobs:
           set -euo pipefail
           ./gradlew clean :app:bundleRelease :app:assembleRelease
 
+          # make output folders
           mkdir -p ../out_aab
           mkdir -p ../out_apk
 
+          # copy built files
           cp app/build/outputs/bundle/release/*.aab ../out_aab/ || true
           cp app/build/outputs/apk/release/*.apk ../out_apk/   || true
 
