@@ -182,7 +182,7 @@ jobs:
           npx cap add android || true
           npx cap sync android
 
-      - name: Apply branding assets (robust, removes duplicates, creates proper adaptive icon + splash)
+      - name: Apply branding assets (robust; flattens foreground to avoid transparent/blank icons)
         shell: bash
         working-directory: android
         run: |
@@ -195,18 +195,15 @@ jobs:
             echo "No branding provided — skip"; exit 0
           fi
 
-          # install ImageMagick
           sudo apt-get update -y
           sudo apt-get install -y imagemagick || true
 
-          # download helper - try both folder/file forms
           if [ -n "$ICON_SRC" ]; then
             case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
             curl -sfSL "${ICON_SRC}icon_xxxhdpi.png" -o /tmp/icon_xxxhdpi.png || true
             curl -sfSL "${ICON_SRC}icon_xxhdpi.png"  -o /tmp/icon_xxhdpi.png  || true
             curl -sfSL "${ICON_SRC}icon_xhdpi.png"   -o /tmp/icon_xhdpi.png   || true
             curl -sfSL "${ICON_SRC}icon_hdpi.png"    -o /tmp/icon_hdpi.png    || true
-            # try direct as file url fallback
             if [ ! -f /tmp/icon_xxxhdpi.png ]; then
               curl -sfSL "${ICON_SRC%/}" -o /tmp/icon_xxxhdpi.png || true
             fi
@@ -220,7 +217,6 @@ jobs:
             fi
           fi
 
-          # CLEAN conflicting files to avoid duplicates (safe remove)
           echo "Removing potential conflicting launcher/splash resources..."
           rm -f app/src/main/res/mipmap-*/ic_launcher* || true
           rm -f app/src/main/res/mipmap-anydpi-v26/* || true
@@ -228,12 +224,10 @@ jobs:
           rm -f app/src/main/res/drawable-nodpi/splash.png || true
           rm -f app/src/main/res/drawable/launch_background.xml || true
 
-          # make dirs
           mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
           mkdir -p app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
 
-          # pick best icon file
           ICON_SOURCE=""
           if [ -f /tmp/icon_xxxhdpi.png ]; then ICON_SOURCE="/tmp/icon_xxxhdpi.png"; fi
           if [ -f /tmp/icon_xxhdpi.png ]; then ICON_SOURCE="/tmp/icon_xxhdpi.png"; fi
@@ -242,40 +236,37 @@ jobs:
 
           if [ -n "$ICON_SOURCE" ]; then
             echo "Using icon source: $ICON_SOURCE"
-
-            # normalize to square transparent base
             convert "$ICON_SOURCE" -auto-orient -resize 1024x1024^ -gravity center -background none -extent 1024x1024 /tmp/icon_base.png || true
 
-            # compute average color for background (fallback to white)
+            # compute avg color fallback
             AVG_COLOR=$(convert /tmp/icon_base.png -scale 1x1\! -format "%[pixel:p{0,0}]" info:- 2>/dev/null || echo "white")
             echo "Average color detected: $AVG_COLOR"
 
-            # create foreground (centered, sized for adaptive icon)
+            # create foreground and then FLATTEN to opaque background to avoid transparent foreground
             convert /tmp/icon_base.png -resize 432x432 /tmp/ic_foreground.png || true
+            convert /tmp/ic_foreground.png -background white -alpha remove -alpha off /tmp/ic_foreground_flat.png || true
 
-            # create background PNG using average color + blurred low-opacity logo overlay so icon visible on all launchers
+            # create background using average color and subtle blur composite
             convert -size 1024x1024 "xc:${AVG_COLOR}" /tmp/ic_background_base.png || true
             convert /tmp/icon_base.png -resize 1200x1200 -gravity center -blur 0x50 -modulate 100,0 -alpha set -channel A -evaluate set 20% /tmp/icon_blur.png || true
             composite -gravity center -dissolve 15 /tmp/icon_blur.png /tmp/ic_background_base.png /tmp/ic_background.png || true
 
-            # create mipmap sizes from icon_base (legacy)
+            # create mipmap sizes from flattened foreground (legacy)
             convert /tmp/icon_base.png -resize 192x192 /tmp/icon_xxxhdpi.png || true
             convert /tmp/icon_base.png -resize 144x144 /tmp/icon_xxhdpi.png  || true
             convert /tmp/icon_base.png -resize 96x96   /tmp/icon_xhdpi.png   || true
             convert /tmp/icon_base.png -resize 72x72   /tmp/icon_hdpi.png    || true
 
-            # copy legacy mipmap icons
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
             cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
             cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
             cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher.png || true
 
-            # write adaptive assets: foreground -> mipmap; background -> drawable
-            cp /tmp/ic_foreground.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
+            # use FLATTENED foreground for adaptive icon
+            cp /tmp/ic_foreground_flat.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
             cp /tmp/ic_background.png app/src/main/res/drawable/ic_launcher_background.png || true
 
-            # write adaptive xml (points to our drawable background and our foreground)
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
               '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
               '  <background android:drawable="@drawable/ic_launcher_background"/>' \
@@ -293,7 +284,7 @@ jobs:
             echo "No icon downloaded; skipping icon creation."
           fi
 
-          # SPLASH: copy splash.png to drawable-nodpi and generate launch_background.xml referencing it
+          # SPLASH handling
           if [ -f /tmp/splash.png ]; then
             cp /tmp/splash.png app/src/main/res/drawable-nodpi/splash.png || true
             LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
@@ -310,10 +301,10 @@ jobs:
             echo "No splash downloaded; skipping splash."
           fi
 
-          # best-effort: run cap sync (non-fatal)
+          # sync (non-fatal)
           npx cap sync android || true
 
-          # debug listing for logs to inspect what was created
+          # debug output
           echo "=== DEBUG: /tmp files ==="
           ls -l /tmp/icon_* /tmp/ic_* /tmp/splash.png || true
 
@@ -334,7 +325,6 @@ jobs:
             echo "=== launch_background.xml ==="
             sed -n '1,200p' app/src/main/res/drawable/launch_background.xml || true
           fi
-
           echo "Branding step finished."
 
       - name: Patch Gradle
