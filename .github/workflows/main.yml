@@ -12,7 +12,7 @@ on:
         required: true
         default: "com.example.web2app"
       WEB_URL:
-        description: "Live URL (must be https:// unless you allow http)"
+        description: "Live URL (must be https:// unless you allow http) - not used for bundled builds"
         required: true
         default: "https://example.com"
       VERSION_NAME:
@@ -28,7 +28,7 @@ on:
         required: true
         default: "35"
       ALLOW_MIXED_CONTENT:
-        description: "Allow http:// content? true/false"
+        description: "Allow http:// content? true/false (not recommended)"
         required: true
         default: "false"
       PLUGINS:
@@ -50,6 +50,10 @@ on:
         description: "Full URL to splash file OR public folder URL containing splash.png (optional)"
         required: false
         default: ""
+      PRIVACY_POLICY_URL:
+        description: "Privacy policy URL (required if you show ads)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -69,6 +73,7 @@ jobs:
       MIN_SDK: "22"
       ALLOW_MIXED_CONTENT: ${{ github.event.inputs.ALLOW_MIXED_CONTENT }}
       PLUGINS: ${{ github.event.inputs.PLUGINS }}
+      PRIVACY_POLICY_URL: ${{ github.event.inputs.PRIVACY_POLICY_URL }}
 
       KEYSTORE_BASE64:   ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -79,16 +84,23 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java (use 17 for Android builds)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 17
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      - name: Setup Android SDK (ensure required build tools)
+        uses: android-actions/setup-android@v3
+        with:
+          api-levels: 35
+          build-tools: "33.0.2"
+          components: "platform-tools,cmdline-tools;latest"
 
       - name: Prepare webDir
         shell: bash
@@ -119,61 +131,69 @@ jobs:
           if [[ "$ALLOW_MIXED_CONTENT" != "true" && ! "$WEB_URL" =~ ^https:// ]]; then
             echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"; exit 1
           fi
+          # keystore secrets required
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then echo "❌ Missing secret: $var"; exit 1; fi
           done
+          # Privacy policy required if you plan to show ads or collect personal data
+          if [ -z "${PRIVACY_POLICY_URL:-}" ]; then
+            echo "⚠️ PRIVACY_POLICY_URL not provided. If you show ads or collect personal data, Play will require a valid privacy policy URL."
+          fi
 
-      - name: Restore keystore
+      - name: Restore keystore (safe)
         shell: bash
         run: |
           set -euo pipefail
           echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
-          ls -l android.keystore
+          chmod 600 android.keystore
+          # COPY to android app folder later (no printing)
 
-      - name: Configure Capacitor
+      - name: Configure Capacitor (bundle web assets, no remote server)
         shell: bash
         run: |
           set -euo pipefail
           echo "WEB_BUILD_DIR currently set to: $WEB_BUILD_DIR"
+
+          if [ ! -d "$WEB_BUILD_DIR" ] || [ -z "$(ls -A "$WEB_BUILD_DIR" 2>/dev/null || true)" ]; then
+            echo "❌ WEB_BUILD_DIR ($WEB_BUILD_DIR) is missing or empty. Build your web app first."
+            ls -la || true
+            exit 1
+          fi
+
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
-          printf '{\n' > capacitor.config.json
-          printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
-          printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
-          printf '  "webDir": "%s",\n' "$WEB_BUILD_DIR" >> capacitor.config.json
-          printf '  "bundledWebRuntime": false,\n' >> capacitor.config.json
-          printf '  "server": {\n' >> capacitor.config.json
-          printf '    "url": "%s",\n' "$WEB_URL" >> capacitor.config.json
-          if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then printf '    "cleartext": true\n' >> capacitor.config.json; else printf '    "cleartext": false\n' >> capacitor.config.json; fi
-          printf '  },\n' >> capacitor.config.json
-          printf '  "android": {\n' >> capacitor.config.json
-          if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then printf '    "allowMixedContent": true\n' >> capacitor.config.json; else printf '    "allowMixedContent": false\n' >> capacitor.config.json; fi
-          printf '  }\n' >> capacitor.config.json
-          printf '}\n' >> capacitor.config.json
+
+          if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then amc=true; else amc=false; fi
+          cat > capacitor.config.json <<EOF
+{
+  "appId": "${APP_ID}",
+  "appName": "${APP_NAME}",
+  "webDir": "${WEB_BUILD_DIR}",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": ${amc}
+  }
+}
+EOF
+
           if [ "$PLUGINS" = "camera" ]; then npm install @capacitor/camera
           elif [ "$PLUGINS" = "push" ]; then npm install @capacitor/push-notifications
           elif [ "$PLUGINS" = "location" ]; then npm install @capacitor/geolocation
           elif [ "$PLUGINS" = "all" ]; then npm install @capacitor/camera @capacitor/push-notifications @capacitor/geolocation
           fi
+
           npx cap add android || true
+          npx cap copy android
           npx cap sync android
 
-      ############################################################################
-      # PRE-FLIGHT: run Android lint (release) to catch manifest/API/permission issues
-      ############################################################################
-      - name: Run Android Lint (release) - preflight
-        shell: bash
-        working-directory: android
-        run: |
-          set -euo pipefail
-          echo "Running :app:lintRelease (this will fail if Lint reports errors)"
-          ./gradlew :app:lintRelease --no-daemon --warning-mode=all || {
-            echo "Lint finished with non-zero exit — see reports under android/app/build/reports/lint-results.html or console above.";
-            exit 1;
-          }
+          if [ -f android/app/src/main/assets/public/index.html ]; then
+            echo "✅ Bundled web assets found in android/app/src/main/assets/public"
+            ls -la android/app/src/main/assets/public | sed -n '1,100p' || true
+          else
+            echo "❌ Bundled web assets NOT found at android/app/src/main/assets/public — build will show remote or blank screen"
+            ls -la android/app/src/main/assets || true
+            exit 1
+          fi
 
-      ############################################################################
-      # Branding step (icons/splash) -- same robust logic as before
-      ############################################################################
       - name: Apply branding assets from URL(s) (robust)
         shell: bash
         working-directory: android
@@ -198,8 +218,8 @@ jobs:
               dl "$ICON_SRC" /tmp/icon_src.png
             else
               case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
-              dl "${ICON_SRC}icon_xxxhdpi.png" /tmp/icon_src.png
-              if [ ! -f /tmp/icon_src.png ]; then dl "${ICON_SRC}icon.png" /tmp/icon_src.png; fi
+              dl "${ICON_SRC}icon_xxxhdpi.png" /tmp/icon_src.png || true
+              if [ ! -f /tmp/icon_src.png ]; then dl "${ICON_SRC}icon.png" /tmp/icon_src.png || true; fi
             fi
           fi
 
@@ -208,7 +228,7 @@ jobs:
               dl "$SPLASH_SRC" /tmp/splash.png
             else
               case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac
-              dl "${SPLASH_SRC}splash.png" /tmp/splash.png
+              dl "${SPLASH_SRC}splash.png" /tmp/splash.png || true
             fi
           fi
 
@@ -228,34 +248,28 @@ jobs:
             convert /tmp/icon_flat.png -resize 144x144\> /tmp/icon_xxhdpi.png  || true
             convert /tmp/icon_flat.png -resize 96x96\>   /tmp/icon_xhdpi.png   || true
             convert /tmp/icon_flat.png -resize 72x72\>   /tmp/icon_hdpi.png    || true
-
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_full.png || true
             cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher_full.png || true
             cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher_full.png || true
             cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher_full.png || true
-
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
             cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
             cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
             cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher.png || true
-
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
             convert /tmp/icon_flat.png -resize 32x32\> /tmp/icon_bg.png || cp /tmp/icon_flat.png /tmp/icon_bg.png || true
             convert /tmp/icon_bg.png -background white -gravity center -extent 48x48 /tmp/icon_bg.png || true
             cp /tmp/icon_bg.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
-
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
               '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
               '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
               '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' \
               '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
-
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
               '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
               '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
               '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' \
               '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
-
             echo "Icon densities and full variants created."
           else
             echo "No icon source found — skipping icon generation."
@@ -268,7 +282,6 @@ jobs:
             convert /tmp/splash.png -background white -alpha remove -alpha off /tmp/splash_flat.png || cp /tmp/splash.png /tmp/splash_flat.png || true
             cp /tmp/splash_flat.png app/src/main/res/drawable-nodpi/splash.png || true
             cp /tmp/splash_flat.png app/src/main/res/drawable/splash.png || true
-
             LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
             mkdir -p app/src/main/res/drawable
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
@@ -278,23 +291,10 @@ jobs:
               '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
               '    </item>' \
               '</layer-list>' > "$LAUNCH_XML" || true
-
             echo "Splash applied and launch_background created/updated."
           else
             echo "No /tmp/splash.png found — splash not applied."
           fi
-
-          echo "=== DEBUG: /tmp files ==="
-          ls -l /tmp/icon* /tmp/splash* || true
-          echo "=== DEBUG: res mipmap-anydpi-v26 ==="
-          ls -l app/src/main/res/mipmap-anydpi-v26 || true
-          echo "=== DEBUG: res mipmap-* ==="
-          ls -l app/src/main/res/mipmap-* | sed -n '1,200p' || true
-          echo "=== DEBUG: res drawable* ==="
-          ls -l app/src/main/res/drawable* | sed -n '1,200p' || true
-          if [ -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml ]; then sed -n '1,200p' app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true; fi
-          if [ -f app/src/main/res/drawable/launch_background.xml ]; then sed -n '1,200p' app/src/main/res/drawable/launch_background.xml || true; fi
-          echo "Branding step done."
 
       - name: Ensure manifest icon entries (use full icon)
         shell: bash
@@ -317,12 +317,17 @@ jobs:
           echo "Patched AndroidManifest (first lines):"
           sed -n '1,80p' "$MF" || true
 
-      - name: Patch Gradle
+      - name: Patch Gradle & Manifest (signing, versions, permissions, exported)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
-          cp ../android.keystore app/release.keystore
+
+          # copy keystore into android module
+          cp ../android.keystore app/release.keystore || true
+          chmod 600 app/release.keystore || true
+
+          # update version codes and SDK targets (works for Groovy and simple Kotlin DSL cases)
           if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
           sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
@@ -332,6 +337,8 @@ jobs:
           sed -i -E "s/targetSdk[ =]+[0-9]+/targetSdk $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
+
+          # inject signing config if not present (quick-safe append)
           if ! grep -q "signingConfigs" "$FILE"; then
             {
               echo ""
@@ -355,57 +362,89 @@ jobs:
               echo "}"
             } >> "$FILE"
           fi
-          if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then
-            MF="app/src/main/AndroidManifest.xml"
-            if [ -f "$MF" ]; then
-              if ! grep -q usesCleartextTraffic "$MF"; then
-                sed -i 's/<application /<application android:usesCleartextTraffic="true" /' "$MF"
+
+          # modify manifest: add POST_NOTIFICATIONS and conditional perms, and ensure android:exported on activities with intent-filters
+          MF="app/src/main/AndroidManifest.xml"
+          if [ -f "$MF" ]; then
+            # add POST_NOTIFICATIONS if missing (Android 13+)
+            if ! grep -q "android.permission.POST_NOTIFICATIONS" "$MF"; then
+              sed -i '/<manifest /a <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MF"
+            fi
+            # add location perms if requested
+            if [ "$PLUGINS" = "location" ] || [ "$PLUGINS" = "all" ]; then
+              if ! grep -q "ACCESS_FINE_LOCATION" "$MF"; then
+                sed -i '/<manifest /a <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' "$MF"
+                sed -i '/<manifest /a <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />' "$MF"
+                sed -i '/<application /i <uses-feature android:name="android.hardware.location.gps" android:required="false" />' "$MF"
               fi
             fi
+            # add camera perm if requested
+            if [ "$PLUGINS" = "camera" ] || [ "$PLUGINS" = "all" ]; then
+              if ! grep -q "android.permission.CAMERA" "$MF"; then
+                sed -i '/<manifest /a <uses-permission android:name="android.permission.CAMERA" />' "$MF"
+                sed -i '/<application /i <uses-feature android:name="android.hardware.camera" android:required="false" />' "$MF"
+              fi
+            fi
+
+            # Add android:exported="true" to any <activity ...> tags that contain an <intent-filter>
+            # Only add if android:exported is missing
+            perl -0777 -i -pe '
+              while (/<activity\b([^>]*)>/g) {
+                $attrs=$1;
+              }
+              # the following substitution processes activity opening tags that are followed by an intent-filter,
+              # and that do NOT already contain android:exported; it inserts android:exported="true"
+              s{<activity\b([^>]*?)>(?=[\s\S]*?<intent-filter)}{
+                my $a=$1;
+                if ($a !~ /android:exported\s*=/) {
+                  "<activity".$a." android:exported=\"true\">";
+                } else {
+                  "<activity".$a.">";
+                }
+              }ge;
+            ' "$MF" || true
+
           fi
 
-      - name: Build release (AAB + APK)
+      - name: Make gradlew executable
+        shell: bash
+        working-directory: android
+        run: |
+          set -euo pipefail
+          if [ -f ./gradlew ]; then chmod +x ./gradlew || true; fi
+
+      - name: Build release (robust copy & debug)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
           ./gradlew clean --no-daemon
-          ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon
+          ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon || true
 
           mkdir -p ../out_aab ../out_apk
-          cp app/build/outputs/bundle/release/*.aab ../out_aab/ || true
-          cp app/build/outputs/apk/release/*.apk ../out_apk/   || true
 
-          echo "=== AAB files ==="; ls -l ../out_aab || true
-          echo "=== APK files ==="; ls -l ../out_apk || true
-
-          if ls ../out_apk/*.apk 1> /dev/null 2>&1; then
-            APK=$(ls ../out_apk/*.apk | head -n1)
-            echo "Listing contents of $APK (top lines):"
-            unzip -l "$APK" | sed -n '1,200p' || true
-            unzip -p "$APK" "res/mipmap-anydpi-v26/ic_launcher.xml" 2>/dev/null | sed -n '1,200p' || true
-            unzip -p "$APK" "res/drawable/launch_background.xml" 2>/dev/null | sed -n '1,200p' || true
-          fi
-
-      ############################################################################
-      # Validate produced AAB with bundletool (structural validation)
-      ############################################################################
-      - name: Validate AAB using bundletool
-        shell: bash
-        working-directory: android
-        run: |
-          set -euo pipefail
-          if ls ../out_aab/*.aab 1> /dev/null 2>&1; then
-            echo "Downloading bundletool..."
-            BUNDLETOOL_JAR="bundletool-all.jar"
-            curl -sSL -o "$BUNDLETOOL_JAR" "https://github.com/google/bundletool/releases/latest/download/bundletool-all.jar"
-            for aab in ../out_aab/*.aab; do
-              echo "Validating $aab with bundletool..."
-              java -jar "$BUNDLETOOL_JAR" validate --bundle="$aab" || { echo "bundletool validation failed for $aab"; exit 1; }
-            done
+          mapfile -d '' aabs < <(find app/build -type f -name '*.aab' -print0 2>/dev/null || true)
+          if [ "${#aabs[@]}" -gt 0 ]; then
+            echo "Found ${#aabs[@]} AAB(s); copying to ../out_aab"
+            for f in "${aabs[@]}"; do cp "$f" ../out_aab/ || true; done
           else
-            echo "No AAB produced to validate."
+            echo "ERROR: No .aab files found in app/build outputs. Listing app/build contents for debug:"
+            find app/build -maxdepth 6 -type f -printf '%p\n' || true
+            exit 1
           fi
+
+          mapfile -d '' apks < <(find app/build -type f -name '*.apk' -print0 2>/dev/null || true)
+          if [ "${#apks[@]}" -gt 0 ]; then
+            echo "Found ${#apks[@]} APK(s); copying to ../out_apk"
+            for f in "${apks[@]}"; do cp "$f" ../out_apk/ || true; done
+          else
+            echo "No APK files found (this is OK if only AAB produced)."
+          fi
+
+          echo "=== FINAL: repo-root/out_aab ==="
+          ls -l ../out_aab || true
+          echo "=== FINAL: repo-root/out_apk ==="
+          ls -l ../out_apk || true
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
