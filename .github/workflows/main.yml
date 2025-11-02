@@ -95,7 +95,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "Starting prepare webDir"
+          echo "Preparing web build dir"
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then npm ci; else npm install; fi
             if npm run | grep -q " build"; then npm run build || true; fi
@@ -146,9 +146,7 @@ jobs:
         run: |
           set -euo pipefail
           WEB_DIR="${WEB_BUILD_DIR:-minimal_www}"
-          echo "npx cap init ${APP_NAME} ${APP_ID} --web-dir=${WEB_DIR}"
           npx cap init "${APP_NAME}" "${APP_ID}" --web-dir="${WEB_DIR}" || true
-          # write capacitor.config.json safely
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "${APP_ID}" >> capacitor.config.json
           printf '  "appName": "%s",\n' "${APP_NAME}" >> capacitor.config.json
@@ -156,7 +154,6 @@ jobs:
           printf '  "bundledWebRuntime": false\n' >> capacitor.config.json
           printf '}\n' >> capacitor.config.json
 
-          # optional plugins
           if [ "${PLUGINS}" = "camera" ]; then npm i @capacitor/camera || true; fi
           if [ "${PLUGINS}" = "push" ]; then npm i @capacitor/push-notifications || true; fi
           if [ "${PLUGINS}" = "location" ]; then npm i @capacitor/geolocation || true; fi
@@ -166,7 +163,7 @@ jobs:
           npx cap copy android || true
           npx cap sync android || true
 
-      - name: Apply branding assets (safe fallbacks) 
+      - name: Apply branding assets (safe fallbacks)
         shell: bash
         working-directory: android
         run: |
@@ -179,7 +176,6 @@ jobs:
 
           dl() { url="$1"; out="$2"; curl -sfSL "$url" -o "$out" || true; }
 
-          # icon
           if [ -n "$ICON_SRC" ]; then
             if [[ "$ICON_SRC" =~ \.png$ ]]; then dl "$ICON_SRC" /tmp/icon_src.png; else dl "${ICON_SRC%/}/icon_xxxhdpi.png" /tmp/icon_src.png || true; fi
           fi
@@ -193,9 +189,9 @@ jobs:
             convert /tmp/icon_flat.png -resize 72x72\> /tmp/icon_hdpi.png || cp /tmp/icon_flat.png /tmp/icon_hdpi.png || true
 
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_full.png || true
-            cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher_full.png || true
-            cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher_full.png || true
-            cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher_full.png || true
+            cp /tmp/icon_xxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher_full.png || true
+            cp /tmp/icon_xhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher_full.png || true
+            cp /tmp/icon_hdpi.png app/src/main/res/mipmap-hdpi/ic_launcher_full.png || true
 
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
             convert /tmp/icon_flat.png -resize 48x48\> /tmp/icon_bg.png || cp /tmp/icon_flat.png /tmp/icon_bg.png || true
@@ -203,7 +199,6 @@ jobs:
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@mipmap/ic_launcher_background"/>' '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
           fi
 
-          # splash
           if [ -n "$SPLASH_SRC" ]; then
             if [[ "$SPLASH_SRC" =~ \.png$ ]]; then dl "$SPLASH_SRC" /tmp/splash.png; else dl "${SPLASH_SRC%/}/splash.png" /tmp/splash.png || true; fi
           fi
@@ -261,18 +256,46 @@ jobs:
           set -euo pipefail
           chmod +x gradlew || true
 
-      - name: Build release (bundle + apk)
+      - name: Build release (bundle + apk) and copy discovered artifacts
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
+          echo "Starting gradle build"
           ./gradlew clean --no-daemon
           ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon || true
+
+          # prepare out folders
           mkdir -p ../out_aab ../out_apk
-          cp app/build/outputs/bundle/release/*.aab ../out_aab/ 2>/dev/null || true
-          cp app/build/outputs/apk/release/*.apk ../out_apk/ 2>/dev/null || true
-          echo "AAB files:"; ls -la ../out_aab || true
-          echo "APK files:"; ls -la ../out_apk || true
+
+          echo "Searching for AAB files under android/app/build/outputs..."
+          AAB_FOUND=0
+          # search common locations for .aab
+          while IFS= read -r -d '' f; do
+            cp "$f" ../out_aab/ || true
+            echo "Copied AAB: $f"
+            AAB_FOUND=1
+          done < <(find app/build/outputs -type f -name "*.aab" -print0 || true)
+
+          echo "Searching for APK files under android/app/build/outputs..."
+          APK_FOUND=0
+          while IFS= read -r -d '' f; do
+            cp "$f" ../out_apk/ || true
+            echo "Copied APK: $f"
+            APK_FOUND=1
+          done < <(find app/build/outputs -type f -name "*.apk" -print0 || true)
+
+          echo "=== Out AAB listing ==="
+          ls -la ../out_aab || true
+          echo "=== Out APK listing ==="
+          ls -la ../out_apk || true
+
+          if [ "$AAB_FOUND" -ne 1 ] && [ "$APK_FOUND" -ne 1 ]; then
+            echo "ERROR: No .aab or .apk artifacts found in app/build/outputs. Printing tree for debugging:"
+            find app/build -maxdepth 5 -type d -print || true
+            find app/build -type f -name "*.aab" -o -name "*.apk" -print || true
+            # Do not exit non-zero so workflow step shows logs; still upload-step will warn.
+          fi
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
