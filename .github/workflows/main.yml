@@ -12,7 +12,7 @@ on:
         required: true
         default: "com.example.web2app"
       WEB_URL:
-        description: "Live URL (not used for bundled builds)"
+        description: "Live URL (must be https://). Not used at runtime for bundled builds."
         required: true
         default: "https://example.com"
       VERSION_NAME:
@@ -27,10 +27,6 @@ on:
         description: "Target / compile SDK"
         required: true
         default: "35"
-      ALLOW_MIXED_CONTENT:
-        description: "Allow http:// content? true/false (not recommended)"
-        required: true
-        default: "false"
       PLUGINS:
         description: "Extra native plugins to include"
         required: true
@@ -71,7 +67,6 @@ jobs:
       VERSION_CODE: ${{ github.event.inputs.VERSION_CODE }}
       TARGET_SDK: ${{ github.event.inputs.TARGET_SDK }}
       MIN_SDK: "22"
-      ALLOW_MIXED_CONTENT: ${{ github.event.inputs.ALLOW_MIXED_CONTENT }}
       PLUGINS: ${{ github.event.inputs.PLUGINS }}
       PRIVACY_POLICY_URL: ${{ github.event.inputs.PRIVACY_POLICY_URL }}
 
@@ -124,16 +119,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # APP_ID basic validation
           if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
             echo "❌ APP_ID invalid: $APP_ID"; exit 1
           fi
+          # VERSION_CODE integer
           if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then echo "❌ VERSION_CODE must be integer"; exit 1; fi
-          if [[ "$ALLOW_MIXED_CONTENT" != "true" && ! "$WEB_URL" =~ ^https:// ]]; then
-            echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"; exit 1
+          # WEB_URL must be https (we ALWAYS use bundled web assets; remote URL only for metadata)
+          if ! [[ "$WEB_URL" =~ ^https:// ]]; then
+            echo "❌ WEB_URL must start with https://"; exit 1
           fi
+          # keystore secrets required
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then echo "❌ Missing secret: $var"; exit 1; fi
           done
+          # privacy policy advisory
           if [ -z "${PRIVACY_POLICY_URL:-}" ]; then
             echo "⚠️ PRIVACY_POLICY_URL not provided. Provide it if you show ads or collect personal data."
           fi
@@ -159,14 +159,14 @@ jobs:
 
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
 
-          # write capacitor.config.json without server.url (bundled)
+          # write a minimal capacitor.config.json WITHOUT server.url (bundled)
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
           printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
           printf '  "webDir": "%s",\n' "$WEB_BUILD_DIR" >> capacitor.config.json
           printf '  "bundledWebRuntime": false,\n' >> capacitor.config.json
           printf '  "android": {\n' >> capacitor.config.json
-          if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then printf '    "allowMixedContent": true\n' >> capacitor.config.json; else printf '    "allowMixedContent": false\n' >> capacitor.config.json; fi
+          printf '    "allowMixedContent": false\n' >> capacitor.config.json
           printf '  }\n' >> capacitor.config.json
           printf '}\n' >> capacitor.config.json
 
@@ -184,7 +184,7 @@ jobs:
             echo "✅ Bundled web assets present in android/app/src/main/assets/public"
             ls -la android/app/src/main/assets/public | sed -n '1,200p' || true
           else
-            echo "❌ Bundled web assets NOT found at android/app/src/main/assets/public"
+            echo "❌ Bundled web assets NOT found at android/app/src/main/assets/public — build will show remote or blank screen"
             ls -la android/app/src/main/assets || true
             exit 1
           fi
@@ -308,7 +308,6 @@ jobs:
               s/\Q$app\E/$new/;
             }
           ' -i "$MF" || true
-          echo "Patched AndroidManifest (first lines):"
           sed -n '1,80p' "$MF" || true
 
       - name: Patch Gradle & Manifest (versions, signing, perms)
@@ -368,7 +367,6 @@ jobs:
               sed -i '/<application /i <uses-feature android:name="android.hardware.camera" android:required="false" />' "$MF"
             fi
 
-            # add android:exported="true" to activities with intent-filters if missing
             perl -0777 -i -pe '
               s{<activity\b([^>]*?)>(?=[\s\S]*?<intent-filter)}{
                 my $a=$1;
