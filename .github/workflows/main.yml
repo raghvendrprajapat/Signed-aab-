@@ -1,4 +1,4 @@
-name: Build Web to Signed Android
+name: Build Web to Signed Android (Optimized)
 
 on:
   workflow_dispatch:
@@ -24,9 +24,13 @@ on:
         required: true
         default: "35"
       WEB_BUNDLE:
-        description: "Bundle web assets inside app? true/false"
+        description: "Bundle web assets inside app? (true/false)"
         required: true
+        type: choice
         default: "true"
+        options:
+          - "true"
+          - "false"
       PLUGINS:
         description: "Extra native plugins (none|camera|push|location|all)"
         required: true
@@ -39,15 +43,15 @@ on:
           - "location"
           - "all"
       APP_ICON_URL:
-        description: "Optional: URL to icon PNG or folder"
+        description: "Optional: URL to icon PNG (1024x1024)"
         required: false
         default: ""
       SPLASH_SCREEN_URL:
-        description: "Optional: URL to splash PNG or folder"
+        description: "Optional: URL to splash PNG (1280x1280)"
         required: false
         default: ""
       PRIVACY_POLICY_URL:
-        description: "Optional: privacy policy URL (if you show ads)"
+        description: "Optional: privacy policy URL (Required for Play Console)"
         required: false
         default: ""
 
@@ -75,21 +79,27 @@ jobs:
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      CI: "true" # For npm ci
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Java 17 (Gradle compatibility)
+      - name: Validate Gradle Wrapper
+        uses: gradle/wrapper-validation-action@v3
+
+      - name: Set up Java 17 (with cache)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+          cache: 'gradle' # Cache Gradle dependencies
 
-      - name: Set up Node 18
+      - name: Set up Node 18 (with cache)
         uses: actions/setup-node@v4
         with:
           node-version: 18
+          cache: 'npm' # Cache npm packages
 
       - name: Prepare webDir (build web if present)
         shell: bash
@@ -98,7 +108,7 @@ jobs:
           echo "Preparing web build dir"
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then npm ci; else npm install; fi
-            if npm run | grep -q " build"; then npm run build || true; fi
+            if npm run | grep -q " build"; then npm run build; fi
           fi
           WEB_BUILD_DIR=""
           for d in dist build public; do
@@ -133,35 +143,36 @@ jobs:
           set -euo pipefail
           echo "${KEYSTORE_BASE64}" | base64 -d > android.keystore
           chmod 600 android.keystore
-          ls -l android.keystore || true
 
       - name: Install Capacitor dev packages
         shell: bash
         run: |
           set -euo pipefail
-          npm install -D @capacitor/core @capacitor/cli @capacitor/android || true
+          npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
-      - name: Configure Capacitor (bundle web)
+      - name: Configure Capacitor
         shell: bash
         run: |
           set -euo pipefail
           WEB_DIR="${WEB_BUILD_DIR:-minimal_www}"
-          npx cap init "${APP_NAME}" "${APP_ID}" --web-dir="${WEB_DIR}" || true
+          npx cap init "${APP_NAME}" "${APP_ID}" --web-dir="${WEB_DIR}"
+          
+          # Write config file dynamically
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "${APP_ID}" >> capacitor.config.json
           printf '  "appName": "%s",\n' "${APP_NAME}" >> capacitor.config.json
           printf '  "webDir": "%s",\n' "${WEB_DIR}" >> capacitor.config.json
-          printf '  "bundledWebRuntime": false\n' >> capacitor.config.json
+          printf '  "bundledWebRuntime": %s\n' "${WEB_BUNDLE}" >> capacitor.config.json # <-- FIXED
           printf '}\n' >> capacitor.config.json
 
-          if [ "${PLUGINS}" = "camera" ]; then npm i @capacitor/camera || true; fi
-          if [ "${PLUGINS}" = "push" ]; then npm i @capacitor/push-notifications || true; fi
-          if [ "${PLUGINS}" = "location" ]; then npm i @capacitor/geolocation || true; fi
-          if [ "${PLUGINS}" = "all" ]; then npm i @capacitor/camera @capacitor/push-notifications @capacitor/geolocation || true; fi
+          if [ "${PLUGINS}" = "camera" ]; then npm i @capacitor/camera; fi
+          if [ "${PLUGINS}" = "push" ]; then npm i @capacitor/push-notifications; fi
+          if [ "${PLUGINS}" = "location" ]; then npm i @capacitor/geolocation; fi
+          if [ "${PLUGINS}" = "all" ]; then npm i @capacitor/camera @capacitor/push-notifications @capacitor/geolocation; fi
 
-          npx cap add android || true
-          npx cap copy android || true
-          npx cap sync android || true
+          npx cap add android
+          npx cap copy android
+          npx cap sync android
 
       - name: Apply branding assets (safe fallbacks)
         shell: bash
@@ -211,13 +222,19 @@ jobs:
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' '  <item android:drawable="@android:color/white"/>' '  <item>' '    <bitmap android:gravity="center" android:src="@drawable/splash"/>' '  </item>' '</layer-list>' > app/src/main/res/drawable/launch_background.xml || true
           fi
 
-      - name: Ensure AndroidManifest icons & permissions
+      - name: Patch AndroidManifest.xml
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
           MF="app/src/main/AndroidManifest.xml"
           if [ -f "$MF" ]; then
+            # Add INTERNET permission if missing
+            if ! grep -q "android.permission.INTERNET" "$MF"; then
+              sed -i '/<manifest/a \    <uses-permission android:name="android.permission.INTERNET" />' "$MF" || true
+            fi
+            
+            # Ensure icons are set
             perl -0777 -pe '
               if (/<application\b[^>]*>/s) {
                 $app = $&; $new = $app;
@@ -230,7 +247,24 @@ jobs:
             ' -i "$MF" || true
           fi
 
-      - name: Patch Gradle (add signing config if missing)
+      - name: Create default ProGuard rules for Capacitor
+        shell: bash
+        working-directory: android
+        run: |
+          set -euo pipefail
+          mkdir -p app
+          printf '%s\n' \
+            '# Capacitor ProGuard rules' \
+            '-keep class * extends com.getcapacitor.JSObject { *; }' \
+            '-keep class * extends com.getcapacitor.Plugin { *; }' \
+            '-keep public class com.getcapacitor.plugin.CapacitorHttp { *; }' \
+            '-keep public class com.getcapacitor.plugin.WebView { *; }' \
+            '-keep public class * implements java.io.Serializable { *; }' \
+            '# Add rules for any custom plugins here' \
+            > app/proguard-rules.pro
+          echo "✅ Created app/proguard-rules.pro"
+
+      - name: Patch Gradle (Optimize & Sign)
         shell: bash
         working-directory: android
         run: |
@@ -245,8 +279,9 @@ jobs:
             sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion ${TARGET_SDK}/" "$FILE" || true
             sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion ${TARGET_SDK}/" "$FILE" || true
             if ! grep -q "signingConfigs" "$FILE"; then
-              printf '\nandroid {\n  signingConfigs {\n    release {\n      storeFile file("release.keystore")\n      storePassword System.getenv("KEYSTORE_PASSWORD")\n      keyAlias System.getenv("KEY_ALIAS")\n      keyPassword System.getenv("KEY_PASSWORD")\n    }\n  }\n  buildTypes {\n    release {\n      signingConfig signingConfigs.release\n      minifyEnabled false\n      shrinkResources false\n      debuggable false\n    }\n  }\n}\n' >> "$FILE" || true
+              printf '\nandroid {\n  signingConfigs {\n    release {\n      storeFile file("release.keystore")\n      storePassword System.getenv("KEYSTORE_PASSWORD")\n      keyAlias System.getenv("KEY_ALIAS")\n      keyPassword System.getenv("KEY_PASSWORD")\n    }\n  }\n  buildTypes {\n    release {\n      signingConfig signingConfigs.release\n      minifyEnabled true\n      shrinkResources true\n      debuggable false\n      proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"\n    }\n  }\n}\n' >> "$FILE" || true
             fi
+            echo "✅ Patched $FILE for signing and optimization"
           fi
 
       - name: Make gradlew executable
@@ -256,33 +291,31 @@ jobs:
           set -euo pipefail
           chmod +x gradlew || true
 
-      - name: Build release (bundle + apk) and copy discovered artifacts
+      - name: Build Release AAB (and APK)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
-          echo "Starting gradle build"
+          echo "Starting gradle build..."
           ./gradlew clean --no-daemon
-          ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon || true
+          # Build both AAB (bundle) for Play Store and APK for testing
+          ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon
 
           # prepare out folders
           mkdir -p ../out_aab ../out_apk
 
-          echo "Searching for AAB files under android/app/build/outputs..."
+          echo "Searching for AAB files..."
           AAB_FOUND=0
-          # search common locations for .aab
           while IFS= read -r -d '' f; do
             cp "$f" ../out_aab/ || true
             echo "Copied AAB: $f"
             AAB_FOUND=1
           done < <(find app/build/outputs -type f -name "*.aab" -print0 || true)
 
-          echo "Searching for APK files under android/app/build/outputs..."
-          APK_FOUND=0
+          echo "Searching for APK files..."
           while IFS= read -r -d '' f; do
             cp "$f" ../out_apk/ || true
             echo "Copied APK: $f"
-            APK_FOUND=1
           done < <(find app/build/outputs -type f -name "*.apk" -print0 || true)
 
           echo "=== Out AAB listing ==="
@@ -290,20 +323,18 @@ jobs:
           echo "=== Out APK listing ==="
           ls -la ../out_apk || true
 
-          if [ "$AAB_FOUND" -ne 1 ] && [ "$APK_FOUND" -ne 1 ]; then
-            echo "ERROR: No .aab or .apk artifacts found in app/build/outputs. Printing tree for debugging:"
-            find app/build -maxdepth 5 -type d -print || true
-            find app/build -type f -name "*.aab" -o -name "*.apk" -print || true
-            # Do not exit non-zero so workflow step shows logs; still upload-step will warn.
+          if [ "$AAB_FOUND" -ne 1 ]; then
+            echo "ERROR: No .aab artifact found in app/build/outputs."
+            exit 1 # Fail the build if AAB is not found
           fi
 
-      - name: Upload signed AAB
+      - name: Upload Signed AAB (For Play Console)
         uses: actions/upload-artifact@v4
         with:
           name: signed-aab
           path: out_aab
 
-      - name: Upload signed APK
+      - name: Upload Signed APK (For Testing)
         uses: actions/upload-artifact@v4
         with:
           name: signed-apk
