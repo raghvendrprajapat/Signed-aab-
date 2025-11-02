@@ -1,4 +1,4 @@
-name: Build Web → Signed Android
+name: Build Web to Signed Android
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ on:
         required: true
         default: "1"
       TARGET_SDK:
-        description: "Target/compile SDK (e.g. 35)"
+        description: "Target / compile SDK (e.g. 35)"
         required: true
         default: "35"
       PLUGINS:
@@ -57,7 +57,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
 
     env:
       APP_NAME: ${{ github.event.inputs.APP_NAME }}
@@ -81,7 +81,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Java (Gradle-compatible)
+      - name: Set up Java (Gradle compatible)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -96,7 +96,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # build if package.json exists
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then npm ci; else npm install; fi
             if npm run | grep -q " build"; then npm run build || true; fi
@@ -107,30 +106,26 @@ jobs:
           done
           if [ -z "$WEB_BUILD_DIR" ]; then
             mkdir -p minimal_www
-            printf '<!doctype html><html><body><h3>Minimal App</h3></body></html>\n' > minimal_www/index.html
+            printf '<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:2rem;">Loading…</body></html>\n' > minimal_www/index.html
             WEB_BUILD_DIR="minimal_www"
           fi
           echo "WEB_BUILD_DIR=$WEB_BUILD_DIR" >> $GITHUB_ENV
           echo "Using web build dir: $WEB_BUILD_DIR"
 
-      - name: Validate required secrets & inputs
+      - name: Validate inputs & secrets
         shell: bash
         run: |
           set -euo pipefail
-          # APP_ID basic validation
           if [[ ! "${APP_ID}" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
-            echo "❌ APP_ID invalid: ${APP_ID}"
-            exit 1
+            echo "❌ APP_ID invalid: ${APP_ID}"; exit 1
           fi
           if ! [[ "${VERSION_CODE}" =~ ^[0-9]+$ ]]; then
-            echo "❌ VERSION_CODE must be integer"
-            exit 1
+            echo "❌ VERSION_CODE must be integer"; exit 1
           fi
           if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ] || [ -z "${KEYSTORE_PASSWORD:-}" ] || [ -z "${KEY_ALIAS:-}" ] || [ -z "${KEY_PASSWORD:-}" ]; then
-            echo "❌ Missing required keystore secrets (ANDROID_KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD)"
-            exit 1
+            echo "❌ Missing required keystore secrets"; exit 1
           fi
-          echo "✅ inputs & secrets present"
+          echo "✅ inputs ok"
 
       - name: Restore keystore (safe)
         shell: bash
@@ -140,7 +135,7 @@ jobs:
           chmod 600 android.keystore
           ls -l android.keystore
 
-      - name: Install Capacitor packages
+      - name: Install Capacitor dev packages
         shell: bash
         run: |
           set -euo pipefail
@@ -150,10 +145,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "WEB_BUILD_DIR is $WEB_BUILD_DIR"
-          npx cap init "${APP_NAME}" "${APP_ID}" --web-dir="$WEB_BUILD_DIR" || true
-          # write capacitor config with bundled assets (no server.url)
-          cat > capacitor.config.json <<EOF
+          echo "WEB_BUILD_DIR is ${WEB_BUILD_DIR}"
+          npx cap init "${APP_NAME}" "${APP_ID}" --web-dir="${WEB_BUILD_DIR}" || true
+          cat > capacitor.config.json <<CAPEOF
 {
   "appId": "${APP_ID}",
   "appName": "${APP_NAME}",
@@ -163,8 +157,7 @@ jobs:
     "allowMixedContent": false
   }
 }
-EOF
-          # optional plugins install
+CAPEOF
           if [ "${PLUGINS}" = "camera" ]; then npm i @capacitor/camera || true; fi
           if [ "${PLUGINS}" = "push" ]; then npm i @capacitor/push-notifications || true; fi
           if [ "${PLUGINS}" = "location" ]; then npm i @capacitor/geolocation || true; fi
@@ -180,16 +173,10 @@ EOF
           set -euo pipefail
           ICON_SRC="${{ github.event.inputs.APP_ICON_URL }}"
           SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
-          # create resource dirs
           rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
           mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
           mkdir -p app/src/main/res/mipmap-anydpi-v26 app/src/main/res/drawable app/src/main/res/drawable-nodpi
-          # helper downloader
-          dl() {
-            url="$1"; out="$2"
-            curl -sfSL "$url" -o "$out" || true
-          }
-          # icon
+          dl() { url="$1"; out="$2"; curl -sfSL "$url" -o "$out" || true; }
           if [ -n "$ICON_SRC" ]; then
             if [[ "$ICON_SRC" =~ \.png$ ]]; then dl "$ICON_SRC" /tmp/icon_src.png; else dl "${ICON_SRC%/}/icon_xxxhdpi.png" /tmp/icon_src.png || true; fi
           fi
@@ -208,13 +195,8 @@ EOF
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
             convert /tmp/icon_flat.png -resize 48x48\> /tmp/icon_bg.png || cp /tmp/icon_flat.png /tmp/icon_bg.png || true
             cp /tmp/icon_bg.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
-              '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
-              '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' \
-              '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@mipmap/ic_launcher_background"/>' '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
           fi
-          # splash
           if [ -n "$SPLASH_SRC" ]; then
             if [[ "$SPLASH_SRC" =~ \.png$ ]]; then dl "$SPLASH_SRC" /tmp/splash.png; else dl "${SPLASH_SRC%/}/splash.png" /tmp/splash.png || true; fi
           fi
@@ -236,14 +218,13 @@ EOF
 EOL
           fi
 
-      - name: Ensure manifest icon entries & permissions
+      - name: Ensure manifest icon entries & safe permissions
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
           MF="app/src/main/AndroidManifest.xml"
           if [ -f "$MF" ]; then
-            # set launcher icons if missing
             perl -0777 -pe '
               if (/<application\b[^>]*>/s) {
                 $app = $&; $new = $app;
@@ -254,28 +235,15 @@ EOL
                 s/\Q$app\E/$new/;
               }
             ' -i "$MF" || true
-            # add POST_NOTIFICATIONS permission (API 33+)
-            if ! grep -q "POST_NOTIFICATIONS" "$MF"; then
-              sed -i '1s/^/<?xml version="1.0" encoding="utf-8"?>\n/' "$MF" || true
-              # append uses-permission at top if not present
-              if ! grep -q "android.permission.POST_NOTIFICATIONS" "$MF"; then
-                sed -i '1s/^/<manifest xmlns:android=\"http:\/\/schemas.android.com\/apk\/res\/android\">\
-\n    <uses-permission android:name=\"android.permission.POST_NOTIFICATIONS\" \/>\
-\n/' "$MF" || true
-                # note: this is a safe best-effort patch; manifest structure may vary
-              fi
-            fi
           fi
 
-      - name: Patch Gradle (versions + signing)
+      - name: Patch Gradle files (versions + signing)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
-          # restore keystore into android app folder
           cp ../android.keystore app/release.keystore || true
-          FILE=""
-          if [ -f app/build.gradle ]; then FILE="app/build.gradle"; elif [ -f app/build.gradle.kts ]; then FILE="app/build.gradle.kts"; fi
+          if [ -f app/build.gradle ]; then FILE="app/build.gradle"; elif [ -f app/build.gradle.kts ]; then FILE="app/build.gradle.kts"; else FILE=""; fi
           if [ -n "$FILE" ]; then
             sed -i -E "s/versionCode[ =]+[0-9]+/versionCode ${VERSION_CODE}/" "$FILE" || true
             sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"${VERSION_NAME}\"/" "$FILE" || true
