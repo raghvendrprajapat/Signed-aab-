@@ -90,13 +90,6 @@ jobs:
         with:
           node-version: 20
 
-      - name: Setup Android SDK (ensure required build tools)
-        uses: android-actions/setup-android@v3
-        with:
-          api-levels: 35
-          build-tools: "33.0.2"
-          components: "platform-tools,cmdline-tools;latest"
-
       - name: Prepare webDir
         shell: bash
         run: |
@@ -119,21 +112,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # APP_ID basic validation
           if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
             echo "❌ APP_ID invalid: $APP_ID"; exit 1
           fi
-          # VERSION_CODE integer
           if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then echo "❌ VERSION_CODE must be integer"; exit 1; fi
-          # WEB_URL must be https (we ALWAYS use bundled web assets; remote URL only for metadata)
           if ! [[ "$WEB_URL" =~ ^https:// ]]; then
             echo "❌ WEB_URL must start with https://"; exit 1
           fi
-          # keystore secrets required
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then echo "❌ Missing secret: $var"; exit 1; fi
           done
-          # privacy policy advisory
           if [ -z "${PRIVACY_POLICY_URL:-}" ]; then
             echo "⚠️ PRIVACY_POLICY_URL not provided. Provide it if you show ads or collect personal data."
           fi
@@ -159,7 +147,6 @@ jobs:
 
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
 
-          # write a minimal capacitor.config.json WITHOUT server.url (bundled)
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
           printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
@@ -184,7 +171,7 @@ jobs:
             echo "✅ Bundled web assets present in android/app/src/main/assets/public"
             ls -la android/app/src/main/assets/public | sed -n '1,200p' || true
           else
-            echo "❌ Bundled web assets NOT found at android/app/src/main/assets/public — build will show remote or blank screen"
+            echo "❌ Bundled web assets NOT found at android/app/src/main/assets/public"
             ls -la android/app/src/main/assets || true
             exit 1
           fi
@@ -196,17 +183,14 @@ jobs:
           set -euo pipefail
           ICON_SRC="${{ github.event.inputs.APP_ICON_URL }}"
           SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
-
           if [ -z "$ICON_SRC" ] && [ -z "$SPLASH_SRC" ]; then
             echo "No branding URLs provided — skipping branding download"; exit 0
           fi
-
           dl() {
             url="$1"; out="$2"
             echo "curl -> $url  -> $out"
             curl -sfSL "$url" -o "$out" || { echo "curl failed for $url (ignored)"; }
           }
-
           if [ -n "$ICON_SRC" ]; then
             if [[ "$ICON_SRC" =~ \.png$ ]]; then
               dl "$ICON_SRC" /tmp/icon_src.png
@@ -216,7 +200,6 @@ jobs:
               if [ ! -f /tmp/icon_src.png ]; then dl "${ICON_SRC}icon.png" /tmp/icon_src.png || true; fi
             fi
           fi
-
           if [ -n "$SPLASH_SRC" ]; then
             if [[ "$SPLASH_SRC" =~ \.png$ ]]; then
               dl "$SPLASH_SRC" /tmp/splash.png
@@ -225,14 +208,11 @@ jobs:
               dl "${SPLASH_SRC}splash.png" /tmp/splash.png || true
             fi
           fi
-
           echo "Purging old generated resource folders..."
           rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
-
           mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
           mkdir -p app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
-
           if [ -f /tmp/icon_src.png ]; then
             echo "Processing source icon..."
             sudo apt-get update -y
@@ -267,27 +247,6 @@ jobs:
             echo "Icon densities and full variants created."
           else
             echo "No icon source found — skipping icon generation."
-          fi
-
-          if [ -f /tmp/splash.png ]; then
-            echo "Installing splash image..."
-            sudo apt-get update -y
-            sudo apt-get install -y imagemagick || true
-            convert /tmp/splash.png -background white -alpha remove -alpha off /tmp/splash_flat.png || cp /tmp/splash.png /tmp/splash_flat.png || true
-            cp /tmp/splash_flat.png app/src/main/res/drawable-nodpi/splash.png || true
-            cp /tmp/splash_flat.png app/src/main/res/drawable/splash.png || true
-            LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
-            mkdir -p app/src/main/res/drawable
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' \
-              '    <item android:drawable="@android:color/white" />' \
-              '    <item>' \
-              '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
-              '    </item>' \
-              '</layer-list>' > "$LAUNCH_XML" || true
-            echo "Splash applied and launch_background created/updated."
-          else
-            echo "No /tmp/splash.png found — splash not applied."
           fi
 
       - name: Ensure manifest icon entries (use full icon)
