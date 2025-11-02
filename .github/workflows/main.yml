@@ -94,10 +94,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "Preparing web build..."
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then npm ci; else npm install; fi
-            # build if npm script present
             if npm run | grep -q " build"; then npm run build || true; fi
             for d in dist build public; do
               if [ -d "$d" ]; then
@@ -106,22 +104,17 @@ jobs:
               fi
             done
           fi
-
-          # fallback minimal site
           if ! grep -q WEB_BUILD_DIR $GITHUB_ENV 2>/dev/null; then
             mkdir -p minimal_www
             printf '<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:2rem;">Loading…</body></html>\n' > minimal_www/index.html
             echo "WEB_BUILD_DIR=minimal_www" >> $GITHUB_ENV
           fi
-
-          # install capacitor deps (dev only)
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
       - name: Validate inputs (strict)
         shell: bash
         run: |
           set -euo pipefail
-          echo "Validating inputs..."
           if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
             echo "❌ APP_ID invalid: $APP_ID"; exit 1
           fi
@@ -146,12 +139,7 @@ jobs:
         run: |
           set -euo pipefail
           WEB_BUILD_DIR="${WEB_BUILD_DIR:-minimal_www}"
-          echo "WEB_BUILD_DIR=$WEB_BUILD_DIR"
-
-          # init (idempotent)
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
-
-          # generate safe capacitor.config.json (no server.url -> bundled)
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
           printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
@@ -161,167 +149,73 @@ jobs:
           printf '    "allowMixedContent": false\n' >> capacitor.config.json
           printf '  }\n' >> capacitor.config.json
           printf '}\n' >> capacitor.config.json
-
-          # optional plugins
           if [ "$PLUGINS" = "camera" ]; then npm install @capacitor/camera; fi
           if [ "$PLUGINS" = "push" ]; then npm install @capacitor/push-notifications; fi
           if [ "$PLUGINS" = "location" ]; then npm install @capacitor/geolocation; fi
           if [ "$PLUGINS" = "all" ]; then npm install @capacitor/camera @capacitor/push-notifications @capacitor/geolocation; fi
-
-          # ensure android platform exists and sync
           npx cap add android || true
           npx cap copy android || true
           npx cap sync android || true
-
-          # bundle the built web assets into android project assets/public
           mkdir -p android/app/src/main/assets/public
           rsync -a --delete "$WEB_BUILD_DIR"/ android/app/src/main/assets/public/ || true
           if [ ! -f android/app/src/main/assets/public/index.html ]; then
             echo "Error: bundled web assets absent at android/app/src/main/assets/public/index.html"; ls -la android/app/src/main/assets || true; exit 1
           fi
-          echo "Bundled web assets into android/app/src/main/assets/public"
 
-      - name: Apply branding assets (safe, placeholders if missing)
+      - name: Apply branding assets (safe placeholders)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
           ICON_SRC="${{ github.event.inputs.APP_ICON_URL }}"
           SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
-          : "${ICON_SRC:=}"
-          : "${SPLASH_SRC:=}"
-          echo "ICON_SRC='${ICON_SRC}' SPLASH_SRC='${SPLASH_SRC}'"
-
-          dl() {
-            local url="$1" out="$2"
-            echo "curl -> $url -> $out"
-            curl -fsSL "$url" -o "$out" || return 1
-          }
-
-          # create directories
           rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
           mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
           mkdir -p app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
-
-          # placeholder PNG (1x1 white) to avoid missing resource errors
-          echo "Writing placeholder PNG to /tmp/placeholder.png"
-          printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==' | base64 -d > /tmp/placeholder.png || true
-
-          # download icon if provided, else use placeholder
+          printf 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==' | base64 -d > /tmp/placeholder.png
           if [ -n "$ICON_SRC" ]; then
-            if [[ "$ICON_SRC" == *.png ]]; then
-              dl "$ICON_SRC" /tmp/icon_src.png || cp /tmp/placeholder.png /tmp/icon_src.png
-            else
-              base="${ICON_SRC%/}"
-              dl "$base/icon_xxxhdpi.png" /tmp/icon_src.png || dl "$base/icon.png" /tmp/icon_src.png || cp /tmp/placeholder.png /tmp/icon_src.png
-            fi
+            if [[ "$ICON_SRC" == *.png ]]; then curl -fsSL "$ICON_SRC" -o /tmp/icon_src.png || cp /tmp/placeholder.png /tmp/icon_src.png; fi
+            if [[ "$ICON_SRC" != *.png ]]; then base="${ICON_SRC%/}"; curl -fsSL "$base/icon_xxxhdpi.png" -o /tmp/icon_src.png || curl -fsSL "$base/icon.png" -o /tmp/icon_src.png || cp /tmp/placeholder.png /tmp/icon_src.png; fi
           else
             cp /tmp/placeholder.png /tmp/icon_src.png
           fi
-
-          # download splash if provided, else use placeholder
           if [ -n "$SPLASH_SRC" ]; then
-            if [[ "$SPLASH_SRC" == *.png ]]; then
-              dl "$SPLASH_SRC" /tmp/splash.png || cp /tmp/placeholder.png /tmp/splash.png
-            else
-              base="${SPLASH_SRC%/}"
-              dl "$base/splash.png" /tmp/splash.png || cp /tmp/placeholder.png /tmp/splash.png
-            fi
+            if [[ "$SPLASH_SRC" == *.png ]]; then curl -fsSL "$SPLASH_SRC" -o /tmp/splash.png || cp /tmp/placeholder.png /tmp/splash.png; fi
+            if [[ "$SPLASH_SRC" != *.png ]]; then base="${SPLASH_SRC%/}"; curl -fsSL "$base/splash.png" -o /tmp/splash.png || cp /tmp/placeholder.png /tmp/splash.png; fi
           else
             cp /tmp/placeholder.png /tmp/splash.png
           fi
-
-          # try to use imagemagick if available to resize; if not, copy placeholder to densities
-          if command -v convert >/dev/null 2>&1; then
-            convert /tmp/icon_src.png -background white -alpha remove -alpha off /tmp/icon_flat.png || cp /tmp/icon_src.png /tmp/icon_flat.png
-            convert /tmp/icon_flat.png -resize 192x192\> /tmp/icon_xxxhdpi.png || cp /tmp/icon_flat.png /tmp/icon_xxxhdpi.png
-            convert /tmp/icon_flat.png -resize 144x144\> /tmp/icon_xxhdpi.png || cp /tmp/icon_flat.png /tmp/icon_xxhdpi.png
-            convert /tmp/icon_flat.png -resize 96x96\> /tmp/icon_xhdpi.png || cp /tmp/icon_flat.png /tmp/icon_xhdpi.png
-            convert /tmp/icon_flat.png -resize 72x72\> /tmp/icon_hdpi.png || cp /tmp/icon_flat.png /tmp/icon_hdpi.png
-          else
-            cp /tmp/icon_src.png /tmp/icon_xxxhdpi.png
-            cp /tmp/icon_src.png /tmp/icon_xxhdpi.png
-            cp /tmp/icon_src.png /tmp/icon_xhdpi.png
-            cp /tmp/icon_src.png /tmp/icon_hdpi.png
-          fi
-
-          # copy icons into resources
-          cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_full.png || true
-          cp /tmp/icon_xxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher_full.png || true
-          cp /tmp/icon_xhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher_full.png || true
-          cp /tmp/icon_hdpi.png app/src/main/res/mipmap-hdpi/ic_launcher_full.png || true
-          cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
-          cp /tmp/icon_xxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
-          cp /tmp/icon_xhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
-          cp /tmp/icon_hdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
-          cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
-
-          # create background for adaptive icon
-          convert /tmp/icon_src.png -resize 32x32\> /tmp/icon_bg.png 2>/dev/null || cp /tmp/icon_src.png /tmp/icon_bg.png || true
-          cp /tmp/icon_bg.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
-
+          cp /tmp/icon_src.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_full.png || true
+          cp /tmp/icon_src.png app/src/main/res/mipmap-xxhdpi/ic_launcher_full.png || true
+          cp /tmp/icon_src.png app/src/main/res/mipmap-xhdpi/ic_launcher_full.png || true
+          cp /tmp/icon_src.png app/src/main/res/mipmap-hdpi/ic_launcher_full.png || true
+          cp /tmp/icon_src.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
           printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@mipmap/ic_launcher_background"/>' '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
-          cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
-
-          # splash - always ensure splash exists to avoid resource linking errors
           cp /tmp/splash.png app/src/main/res/drawable-nodpi/splash.png || true
           cp /tmp/splash.png app/src/main/res/drawable/splash.png || true
           printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' '  <item android:drawable="@android:color/white" />' '  <item>' '    <bitmap android:gravity="center" android:src="@drawable/splash" />' '  </item>' '</layer-list>' > app/src/main/res/drawable/launch_background.xml || true
 
-          echo "Branding assets applied (placeholders used if no URLs provided)."
-
-      - name: Ensure manifest icon entries & add permissions (use full icon)
+      - name: Ensure manifest icon entries & add permissions
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
           MF="app/src/main/AndroidManifest.xml"
-          if [ ! -f "$MF" ]; then echo "No AndroidManifest.xml found — skipping manifest patch"; exit 0; fi
-
-          # set launcher icons to ic_launcher_full
-          perl -0777 -pe '
-            if (/<application\b[^>]*>/s) {
-              $app = $&;
-              $new = $app;
-              if ($new !~ /android:icon=/) { $new =~ s/<application/<application android:icon=\"\@mipmap\/ic_launcher_full\"/; }
-              else { $new =~ s/android:icon=\"[^\"]*\"/android:icon=\"\@mipmap\/ic_launcher_full\"/g; }
-              if ($new !~ /android:roundIcon=/) { $new =~ s/<application/<application android:roundIcon=\"\@mipmap\/ic_launcher_full\"/; }
-              else { $new =~ s/android:roundIcon=\"[^\"]*\"/android:roundIcon=\"\@mipmap\/ic_launcher_full\"/g; }
-              s/\Q$app\E/$new/;
-            }
-          ' -i "$MF" || true
-
-          # add POST_NOTIFICATIONS permission for Android 13+ users (safe)
-          if ! grep -q "android.permission.POST_NOTIFICATIONS" "$MF"; then
-            perl -0777 -pe 's|<manifest\b([^>]*)>|<manifest$1>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />|s' -i "$MF" || true
-          fi
-
-          # add camera/location only if plugins selected
-          PLUGINS="${PLUGINS:-none}"
-          if [[ "$PLUGINS" == "camera" ]] || [[ "$PLUGINS" == "all" ]]; then
-            if ! grep -q "android.permission.CAMERA" "$MF"; then
-              perl -0777 -pe 's|<manifest\b([^>]*)>|<manifest$1>\n    <uses-permission android:name="android.permission.CAMERA" />|s' -i "$MF" || true
+          if [ -f "$MF" ]; then
+            perl -0777 -pe 'if (/<application\b[^>]*>/s) { $app=$&; $new=$app; if ($new !~ /android:icon=/) { $new =~ s/<application/<application android:icon=\"\@mipmap\/ic_launcher_full\"/; } else { $new =~ s/android:icon=\"[^\"]*\"/android:icon=\"\@mipmap\/ic_launcher_full\"/g; } if ($new !~ /android:roundIcon=/) { $new =~ s/<application/<application android:roundIcon=\"\@mipmap\/ic_launcher_full\"/; } else { $new =~ s/android:roundIcon=\"[^\"]*\"/android:roundIcon=\"\@mipmap\/ic_launcher_full\"/g; } s/\Q$app\E/$new/; }' -i "$MF" || true
+            if ! grep -q "android.permission.POST_NOTIFICATIONS" "$MF"; then
+              perl -0777 -pe 's|<manifest\b([^>]*)>|<manifest$1>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />|s' -i "$MF" || true
             fi
           fi
-          if [[ "$PLUGINS" == "location" ]] || [[ "$PLUGINS" == "all" ]]; then
-            if ! grep -q "android.permission.ACCESS_FINE_LOCATION" "$MF"; then
-              perl -0777 -pe 's|<manifest\b([^>]*)>|<manifest$1>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />|s' -i "$MF" || true
-            fi
-          fi
-
-          echo "Patched AndroidManifest (first 80 lines):"
-          sed -n '1,80p' "$MF" || true
 
       - name: Patch Gradle & manifest settings (versions, signing)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
-          # restore keystore into android folder
           cp ../android.keystore app/release.keystore || true
           if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
-
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
           sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
           sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE" || true
@@ -330,8 +224,6 @@ jobs:
           sed -i -E "s/targetSdk[ =]+[0-9]+/targetSdk $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
-
-          # add signingConfigs and buildTypes if missing
           if ! grep -q "signingConfigs" "$FILE"; then
             {
               echo ""
@@ -363,21 +255,49 @@ jobs:
           set -euo pipefail
           if [ -f ./gradlew ]; then chmod +x ./gradlew || true; fi
 
-      - name: Build release (bundle + apk)
+      - name: Build release (bundle + apk) and reliably copy artifacts
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
+          echo "Start gradle build..."
           ./gradlew clean --no-daemon
-          # try bundle first; if fails, still attempt assembleRelease
           ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon || true
 
-          mkdir -p ../out_aab ../out_apk
-          cp app/build/outputs/bundle/release/*.aab ../out_aab/ 2>/dev/null || true
-          cp app/build/outputs/apk/release/*.apk ../out_apk/   2>/dev/null || true
+          # debug: list outputs
+          echo "---- LS app/build outputs ----"
+          ls -la app/build || true
+          echo "---- LS bundle/release ----"
+          ls -la app/build/outputs/bundle/release || true
+          echo "---- LS apk/release ----"
+          ls -la app/build/outputs/apk/release || true
 
-          echo "=== AAB files ==="; ls -l ../out_aab || true
-          echo "=== APK files ==="; ls -l ../out_apk || true
+          # ensure out dirs
+          mkdir -p ../out_aab ../out_apk
+          # enable nullglob for safe array handling
+          shopt -s nullglob
+          AABS=(app/build/outputs/bundle/release/*.aab)
+          APKS=(app/build/outputs/apk/release/*.apk)
+
+          if [ ${#AABS[@]} -gt 0 ]; then
+            echo "Copying AABs: ${AABS[*]}"
+            cp "${AABS[@]}" ../out_aab/ || true
+          else
+            echo "No AAB files found."
+          fi
+
+          if [ ${#APKS[@]} -gt 0 ]; then
+            echo "Copying APKs: ${APKS[*]}"
+            cp "${APKS[@]}" ../out_apk/ || true
+          else
+            echo "No APK files found."
+          fi
+
+          # final listing
+          echo "=== After copy: ../out_aab ==="
+          ls -la ../out_aab || true
+          echo "=== After copy: ../out_apk ==="
+          ls -la ../out_apk || true
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
