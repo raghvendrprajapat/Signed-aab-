@@ -47,7 +47,7 @@ on:
         required: false
         default: ""
       PRIVACY_POLICY_URL:
-        description: "Optional privacy policy URL (if you show ads)"
+        description: "Optional: privacy policy URL (if you show ads)"
         required: false
         default: ""
 
@@ -60,31 +60,42 @@ jobs:
     timeout-minutes: 60
 
     env:
+      APP_NAME: ${{ github.event.inputs.APP_NAME }}
+      APP_ID: ${{ github.event.inputs.APP_ID }}
+      VERSION_NAME: ${{ github.event.inputs.VERSION_NAME }}
+      VERSION_CODE: ${{ github.event.inputs.VERSION_CODE }}
+      TARGET_SDK: ${{ github.event.inputs.TARGET_SDK }}
+      WEB_BUNDLE: ${{ github.event.inputs.WEB_BUNDLE }}
+      PLUGINS: ${{ github.event.inputs.PLUGINS }}
+      APP_ICON_URL: ${{ github.event.inputs.APP_ICON_URL }}
+      SPLASH_SCREEN_URL: ${{ github.event.inputs.SPLASH_SCREEN_URL }}
+      PRIVACY_POLICY_URL: ${{ github.event.inputs.PRIVACY_POLICY_URL }}
       MIN_SDK: "22"
+      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Java 17 (Gradle compatibility)
+      - name: Set up Java 17 (Gradle compatibility)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Setup Node 18
+      - name: Set up Node 18
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      - name: Prepare webDir (build web and set WEB_BUILD_DIR)
+      - name: Prepare webDir (build web if present)
         shell: bash
         run: |
           set -euo pipefail
-          echo "Inputs:"
-          echo " APP_ID=${{ github.event.inputs.APP_ID }}"
-          echo " APP_NAME=${{ github.event.inputs.APP_NAME }}"
-          # build web if package.json present
+          echo "Starting prepare webDir"
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then npm ci; else npm install; fi
             if npm run | grep -q " build"; then npm run build || true; fi
@@ -101,31 +112,28 @@ jobs:
           echo "WEB_BUILD_DIR=${WEB_BUILD_DIR}" >> $GITHUB_ENV
           echo "Using web build dir: ${WEB_BUILD_DIR}"
 
-      - name: Validate inputs & required secrets
+      - name: Validate inputs & secrets
         shell: bash
         run: |
           set -euo pipefail
-          APP_ID="${{ github.event.inputs.APP_ID }}"
-          VERSION_CODE="${{ github.event.inputs.VERSION_CODE }}"
-          if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
-            echo "ERROR: APP_ID invalid: $APP_ID"; exit 1
+          if [[ ! "${APP_ID}" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
+            echo "ERROR: APP_ID invalid: ${APP_ID}"; exit 1
           fi
-          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+          if ! [[ "${VERSION_CODE}" =~ ^[0-9]+$ ]]; then
             echo "ERROR: VERSION_CODE must be integer"; exit 1
           fi
-          # keystore secrets must exist
-          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ] || [ -z "${{ secrets.KEYSTORE_PASSWORD }}" ] || [ -z "${{ secrets.KEY_ALIAS }}" ] || [ -z "${{ secrets.KEY_PASSWORD }}" ]; then
-            echo "ERROR: Please set secrets: ANDROID_KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD"; exit 1
+          if [ -z "${KEYSTORE_BASE64:-}" ] || [ -z "${KEYSTORE_PASSWORD:-}" ] || [ -z "${KEY_ALIAS:-}" ] || [ -z "${KEY_PASSWORD:-}" ]; then
+            echo "ERROR: Missing keystore secrets. Set ANDROID_KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD"; exit 1
           fi
-          echo "✅ inputs & secrets present"
+          echo "✅ inputs & secrets ok"
 
-      - name: Restore keystore (from base64 secret)
+      - name: Restore keystore
         shell: bash
         run: |
           set -euo pipefail
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android.keystore
+          echo "${KEYSTORE_BASE64}" | base64 -d > android.keystore
           chmod 600 android.keystore
-          ls -l android.keystore
+          ls -l android.keystore || true
 
       - name: Install Capacitor dev packages
         shell: bash
@@ -133,44 +141,38 @@ jobs:
           set -euo pipefail
           npm install -D @capacitor/core @capacitor/cli @capacitor/android || true
 
-      - name: Configure Capacitor (bundle web assets inside app)
+      - name: Configure Capacitor (bundle web)
         shell: bash
         run: |
           set -euo pipefail
-          APP_NAME="${{ github.event.inputs.APP_NAME }}"
-          APP_ID="${{ github.event.inputs.APP_ID }}"
           WEB_DIR="${WEB_BUILD_DIR:-minimal_www}"
-          echo "Initializing capacitor with webDir=${WEB_DIR}"
-          npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_DIR" || true
-
-          # write capacitor.config.json using printf (avoid heredoc parsing issues)
+          echo "npx cap init ${APP_NAME} ${APP_ID} --web-dir=${WEB_DIR}"
+          npx cap init "${APP_NAME}" "${APP_ID}" --web-dir="${WEB_DIR}" || true
+          # write capacitor.config.json safely
           printf '{\n' > capacitor.config.json
-          printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
-          printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
-          printf '  "webDir": "%s",\n' "$WEB_DIR" >> capacitor.config.json
-          printf '  "bundledWebRuntime": false,\n' >> capacitor.config.json
-          printf '  "server": {}\n' >> capacitor.config.json
+          printf '  "appId": "%s",\n' "${APP_ID}" >> capacitor.config.json
+          printf '  "appName": "%s",\n' "${APP_NAME}" >> capacitor.config.json
+          printf '  "webDir": "%s",\n' "${WEB_DIR}" >> capacitor.config.json
+          printf '  "bundledWebRuntime": false\n' >> capacitor.config.json
           printf '}\n' >> capacitor.config.json
 
-          # install optional plugins
-          PLUGINS="${{ github.event.inputs.PLUGINS }}"
-          if [ "$PLUGINS" = "camera" ]; then npm i @capacitor/camera || true; fi
-          if [ "$PLUGINS" = "push" ]; then npm i @capacitor/push-notifications || true; fi
-          if [ "$PLUGINS" = "location" ]; then npm i @capacitor/geolocation || true; fi
-          if [ "$PLUGINS" = "all" ]; then npm i @capacitor/camera @capacitor/push-notifications @capacitor/geolocation || true; fi
+          # optional plugins
+          if [ "${PLUGINS}" = "camera" ]; then npm i @capacitor/camera || true; fi
+          if [ "${PLUGINS}" = "push" ]; then npm i @capacitor/push-notifications || true; fi
+          if [ "${PLUGINS}" = "location" ]; then npm i @capacitor/geolocation || true; fi
+          if [ "${PLUGINS}" = "all" ]; then npm i @capacitor/camera @capacitor/push-notifications @capacitor/geolocation || true; fi
 
           npx cap add android || true
           npx cap copy android || true
           npx cap sync android || true
 
-      - name: Apply branding assets (icon + splash) - safe fallback
+      - name: Apply branding assets (safe fallbacks) 
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
-          ICON_SRC="${{ github.event.inputs.APP_ICON_URL }}"
-          SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
-          # cleanup
+          ICON_SRC="${APP_ICON_URL:-}"
+          SPLASH_SRC="${SPLASH_SCREEN_URL:-}"
           rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
           mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
           mkdir -p app/src/main/res/mipmap-anydpi-v26 app/src/main/res/drawable app/src/main/res/drawable-nodpi
@@ -198,7 +200,6 @@ jobs:
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
             convert /tmp/icon_flat.png -resize 48x48\> /tmp/icon_bg.png || cp /tmp/icon_flat.png /tmp/icon_bg.png || true
             cp /tmp/icon_bg.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
-
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@mipmap/ic_launcher_background"/>' '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
           fi
 
@@ -212,11 +213,10 @@ jobs:
             convert /tmp/splash.png -background white -alpha remove -alpha off /tmp/splash_flat.png || cp /tmp/splash.png /tmp/splash_flat.png || true
             cp /tmp/splash_flat.png app/src/main/res/drawable-nodpi/splash.png || true
             cp /tmp/splash_flat.png app/src/main/res/drawable/splash.png || true
-            mkdir -p app/src/main/res/drawable
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' '  <item android:drawable="@android:color/white"/>' '  <item>' '    <bitmap android:gravity="center" android:src="@drawable/splash"/>' '  </item>' '</layer-list>' > app/src/main/res/drawable/launch_background.xml || true
           fi
 
-      - name: Ensure manifest icon entries & add safe permissions
+      - name: Ensure AndroidManifest icons & permissions
         shell: bash
         working-directory: android
         run: |
@@ -235,7 +235,7 @@ jobs:
             ' -i "$MF" || true
           fi
 
-      - name: Patch Gradle (versions and signing)
+      - name: Patch Gradle (add signing config if missing)
         shell: bash
         working-directory: android
         run: |
@@ -244,32 +244,13 @@ jobs:
           FILE=""
           if [ -f app/build.gradle ]; then FILE="app/build.gradle"; elif [ -f app/build.gradle.kts ]; then FILE="app/build.gradle.kts"; fi
           if [ -n "$FILE" ]; then
-            sed -i -E "s/versionCode[ =]+[0-9]+/versionCode ${GITHUB_REF_NAME:-${{ github.event.inputs.VERSION_CODE }}}/" "$FILE" || true
-            sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"${{ github.event.inputs.VERSION_NAME }}\"/" "$FILE" || true
+            sed -i -E "s/versionCode[ =]+[0-9]+/versionCode ${VERSION_CODE}/" "$FILE" || true
+            sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"${VERSION_NAME}\"/" "$FILE" || true
             sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion ${MIN_SDK}/" "$FILE" || true
-            sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion ${GITHUB_REF_NAME:-${{ github.event.inputs.TARGET_SDK }}}/" "$FILE" || true
-            sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion ${GITHUB_REF_NAME:-${{ github.event.inputs.TARGET_SDK }}}/" "$FILE" || true
+            sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion ${TARGET_SDK}/" "$FILE" || true
+            sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion ${TARGET_SDK}/" "$FILE" || true
             if ! grep -q "signingConfigs" "$FILE"; then
-              cat >> "$FILE" <<'GRAD'
-android {
-    signingConfigs {
-        release {
-            storeFile file("release.keystore")
-            storePassword System.getenv("KEYSTORE_PASSWORD")
-            keyAlias System.getenv("KEY_ALIAS")
-            keyPassword System.getenv("KEY_PASSWORD")
-        }
-    }
-    buildTypes {
-        release {
-            signingConfig signingConfigs.release
-            minifyEnabled false
-            shrinkResources false
-            debuggable false
-        }
-    }
-}
-GRAD
+              printf '\nandroid {\n  signingConfigs {\n    release {\n      storeFile file("release.keystore")\n      storePassword System.getenv("KEYSTORE_PASSWORD")\n      keyAlias System.getenv("KEY_ALIAS")\n      keyPassword System.getenv("KEY_PASSWORD")\n    }\n  }\n  buildTypes {\n    release {\n      signingConfig signingConfigs.release\n      minifyEnabled false\n      shrinkResources false\n      debuggable false\n    }\n  }\n}\n' >> "$FILE" || true
             fi
           fi
 
@@ -285,7 +266,6 @@ GRAD
         working-directory: android
         run: |
           set -euo pipefail
-          echo "Starting gradle build"
           ./gradlew clean --no-daemon
           ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon || true
           mkdir -p ../out_aab ../out_apk
