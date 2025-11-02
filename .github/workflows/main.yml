@@ -12,7 +12,7 @@ on:
         required: true
         default: "com.example.web2app"
       WEB_URL:
-        description: "Live URL (must be https:// unless you allow http) - not used for bundled builds"
+        description: "Live URL (not used for bundled builds)"
         required: true
         default: "https://example.com"
       VERSION_NAME:
@@ -51,7 +51,7 @@ on:
         required: false
         default: ""
       PRIVACY_POLICY_URL:
-        description: "Privacy policy URL (required if you show ads)"
+        description: "Privacy policy URL (recommended if you show ads)"
         required: false
         default: ""
 
@@ -84,7 +84,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Java (use 17 for Android builds)
+      - name: Set up Java (use 17)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -131,13 +131,11 @@ jobs:
           if [[ "$ALLOW_MIXED_CONTENT" != "true" && ! "$WEB_URL" =~ ^https:// ]]; then
             echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"; exit 1
           fi
-          # keystore secrets required
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then echo "❌ Missing secret: $var"; exit 1; fi
           done
-          # Privacy policy required if you plan to show ads or collect personal data
           if [ -z "${PRIVACY_POLICY_URL:-}" ]; then
-            echo "⚠️ PRIVACY_POLICY_URL not provided. If you show ads or collect personal data, Play will require a valid privacy policy URL."
+            echo "⚠️ PRIVACY_POLICY_URL not provided. Provide it if you show ads or collect personal data."
           fi
 
       - name: Restore keystore (safe)
@@ -146,34 +144,31 @@ jobs:
           set -euo pipefail
           echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
           chmod 600 android.keystore
-          # COPY to android app folder later (no printing)
 
-      - name: Configure Capacitor (bundle web assets, no remote server)
+      - name: Configure Capacitor (bundle web assets, no server.url)
         shell: bash
         run: |
           set -euo pipefail
           echo "WEB_BUILD_DIR currently set to: $WEB_BUILD_DIR"
 
           if [ ! -d "$WEB_BUILD_DIR" ] || [ -z "$(ls -A "$WEB_BUILD_DIR" 2>/dev/null || true)" ]; then
-            echo "❌ WEB_BUILD_DIR ($WEB_BUILD_DIR) is missing or empty. Build your web app first."
+            echo "❌ WEB_BUILD_DIR ($WEB_BUILD_DIR) missing or empty. Build your web app first."
             ls -la || true
             exit 1
           fi
 
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
 
-          if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then amc=true; else amc=false; fi
-          cat > capacitor.config.json <<EOF
-{
-  "appId": "${APP_ID}",
-  "appName": "${APP_NAME}",
-  "webDir": "${WEB_BUILD_DIR}",
-  "bundledWebRuntime": false,
-  "android": {
-    "allowMixedContent": ${amc}
-  }
-}
-EOF
+          # write capacitor.config.json without server.url (bundled)
+          printf '{\n' > capacitor.config.json
+          printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
+          printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
+          printf '  "webDir": "%s",\n' "$WEB_BUILD_DIR" >> capacitor.config.json
+          printf '  "bundledWebRuntime": false,\n' >> capacitor.config.json
+          printf '  "android": {\n' >> capacitor.config.json
+          if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then printf '    "allowMixedContent": true\n' >> capacitor.config.json; else printf '    "allowMixedContent": false\n' >> capacitor.config.json; fi
+          printf '  }\n' >> capacitor.config.json
+          printf '}\n' >> capacitor.config.json
 
           if [ "$PLUGINS" = "camera" ]; then npm install @capacitor/camera
           elif [ "$PLUGINS" = "push" ]; then npm install @capacitor/push-notifications
@@ -186,10 +181,10 @@ EOF
           npx cap sync android
 
           if [ -f android/app/src/main/assets/public/index.html ]; then
-            echo "✅ Bundled web assets found in android/app/src/main/assets/public"
-            ls -la android/app/src/main/assets/public | sed -n '1,100p' || true
+            echo "✅ Bundled web assets present in android/app/src/main/assets/public"
+            ls -la android/app/src/main/assets/public | sed -n '1,200p' || true
           else
-            echo "❌ Bundled web assets NOT found at android/app/src/main/assets/public — build will show remote or blank screen"
+            echo "❌ Bundled web assets NOT found at android/app/src/main/assets/public"
             ls -la android/app/src/main/assets || true
             exit 1
           fi
@@ -199,7 +194,6 @@ EOF
         working-directory: android
         run: |
           set -euo pipefail
-
           ICON_SRC="${{ github.event.inputs.APP_ICON_URL }}"
           SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
 
@@ -317,17 +311,14 @@ EOF
           echo "Patched AndroidManifest (first lines):"
           sed -n '1,80p' "$MF" || true
 
-      - name: Patch Gradle & Manifest (signing, versions, permissions, exported)
+      - name: Patch Gradle & Manifest (versions, signing, perms)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
-
-          # copy keystore into android module
           cp ../android.keystore app/release.keystore || true
           chmod 600 app/release.keystore || true
 
-          # update version codes and SDK targets (works for Groovy and simple Kotlin DSL cases)
           if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
           sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
@@ -338,7 +329,6 @@ EOF
           sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE" || true
           sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
 
-          # inject signing config if not present (quick-safe append)
           if ! grep -q "signingConfigs" "$FILE"; then
             {
               echo ""
@@ -363,37 +353,23 @@ EOF
             } >> "$FILE"
           fi
 
-          # modify manifest: add POST_NOTIFICATIONS and conditional perms, and ensure android:exported on activities with intent-filters
           MF="app/src/main/AndroidManifest.xml"
           if [ -f "$MF" ]; then
-            # add POST_NOTIFICATIONS if missing (Android 13+)
             if ! grep -q "android.permission.POST_NOTIFICATIONS" "$MF"; then
               sed -i '/<manifest /a <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MF"
             fi
-            # add location perms if requested
             if [ "$PLUGINS" = "location" ] || [ "$PLUGINS" = "all" ]; then
-              if ! grep -q "ACCESS_FINE_LOCATION" "$MF"; then
-                sed -i '/<manifest /a <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' "$MF"
-                sed -i '/<manifest /a <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />' "$MF"
-                sed -i '/<application /i <uses-feature android:name="android.hardware.location.gps" android:required="false" />' "$MF"
-              fi
+              sed -i '/<manifest /a <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />' "$MF"
+              sed -i '/<manifest /a <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />' "$MF"
+              sed -i '/<application /i <uses-feature android:name="android.hardware.location.gps" android:required="false" />' "$MF"
             fi
-            # add camera perm if requested
             if [ "$PLUGINS" = "camera" ] || [ "$PLUGINS" = "all" ]; then
-              if ! grep -q "android.permission.CAMERA" "$MF"; then
-                sed -i '/<manifest /a <uses-permission android:name="android.permission.CAMERA" />' "$MF"
-                sed -i '/<application /i <uses-feature android:name="android.hardware.camera" android:required="false" />' "$MF"
-              fi
+              sed -i '/<manifest /a <uses-permission android:name="android.permission.CAMERA" />' "$MF"
+              sed -i '/<application /i <uses-feature android:name="android.hardware.camera" android:required="false" />' "$MF"
             fi
 
-            # Add android:exported="true" to any <activity ...> tags that contain an <intent-filter>
-            # Only add if android:exported is missing
+            # add android:exported="true" to activities with intent-filters if missing
             perl -0777 -i -pe '
-              while (/<activity\b([^>]*)>/g) {
-                $attrs=$1;
-              }
-              # the following substitution processes activity opening tags that are followed by an intent-filter,
-              # and that do NOT already contain android:exported; it inserts android:exported="true"
               s{<activity\b([^>]*?)>(?=[\s\S]*?<intent-filter)}{
                 my $a=$1;
                 if ($a !~ /android:exported\s*=/) {
@@ -403,7 +379,6 @@ EOF
                 }
               }ge;
             ' "$MF" || true
-
           fi
 
       - name: Make gradlew executable
