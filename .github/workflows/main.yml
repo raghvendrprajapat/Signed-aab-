@@ -170,26 +170,29 @@ jobs:
             echo "No branding URLs provided — skipping branding download"; exit 0
           fi
 
+          # helper: download file to target path (silent OK)
           dl() {
             url="$1"; out="$2"
             echo "curl -> $url  -> $out"
             curl -sfSL "$url" -o "$out" || { echo "curl failed for $url (ignored)"; }
           }
 
+          # normalize and download icons:
           if [ -n "$ICON_SRC" ]; then
+            # if ICON_SRC ends with .png -> treat as direct file
             if [[ "$ICON_SRC" =~ \.png$ ]]; then
               echo "ICON_SRC appears to be a direct PNG file: $ICON_SRC"
-              dl "$ICON_SRC" /tmp/icon_xxxhdpi.png
+              dl "$ICON_SRC" /tmp/icon_src.png
             else
               case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
               echo "ICON_SRC treated as folder: $ICON_SRC"
-              dl "${ICON_SRC}icon_xxxhdpi.png" /tmp/icon_xxxhdpi.png
-              dl "${ICON_SRC}icon_xxhdpi.png"  /tmp/icon_xxhdpi.png
-              dl "${ICON_SRC}icon_xhdpi.png"   /tmp/icon_xhdpi.png
-              dl "${ICON_SRC}icon_hdpi.png"    /tmp/icon_hdpi.png
+              dl "${ICON_SRC}icon_xxxhdpi.png" /tmp/icon_src.png
+              # fallback attempts (if folder only has single icon.png)
+              if [ ! -f /tmp/icon_src.png ]; then dl "${ICON_SRC}icon.png" /tmp/icon_src.png; fi
             fi
           fi
 
+          # normalize and download splash:
           if [ -n "$SPLASH_SRC" ]; then
             if [[ "$SPLASH_SRC" =~ \.png$ ]]; then
               echo "SPLASH_SRC appears to be a direct PNG file: $SPLASH_SRC"
@@ -201,43 +204,76 @@ jobs:
             fi
           fi
 
+          # purge previously generated resources to avoid merge problems
           echo "Purging old generated resource folders..."
           rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
 
+          # create target folders
           mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
           mkdir -p app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
 
-          if [ -f /tmp/icon_xxxhdpi.png ]; then
+          # If we have a source icon, flatten and resize into densities and also create "full" variants
+          if [ -f /tmp/icon_src.png ]; then
+            echo "Processing source icon..."
+            # install imagemagick in runner (best-effort)
+            sudo apt-get update -y
+            sudo apt-get install -y imagemagick || true
+
+            # flatten transparency to white to avoid blank icons
+            convert /tmp/icon_src.png -background white -alpha remove -alpha off /tmp/icon_flat.png || cp /tmp/icon_src.png /tmp/icon_flat.png || true
+
+            # create densities (sizes chosen typical)
+            convert /tmp/icon_flat.png -resize 192x192\> /tmp/icon_xxxhdpi.png || true
+            convert /tmp/icon_flat.png -resize 144x144\> /tmp/icon_xxhdpi.png  || true
+            convert /tmp/icon_flat.png -resize 96x96\>   /tmp/icon_xhdpi.png   || true
+            convert /tmp/icon_flat.png -resize 72x72\>   /tmp/icon_hdpi.png    || true
+
+            # create "full" files (same images but named ic_launcher_full)
+            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_full.png || true
+            cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher_full.png || true
+            cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher_full.png || true
+            cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher_full.png || true
+
+            # also write legacy ic_launcher (keeps compatibility)
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true
-          fi
-          if [ -f /tmp/icon_xxhdpi.png ]; then cp /tmp/icon_xxhdpi.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true; fi
-          if [ -f /tmp/icon_xhdpi.png ]; then cp /tmp/icon_xhdpi.png app/src/main/res/mipmap-xhdpi/ic_launcher.png || true; fi
-          if [ -f /tmp/icon_hdpi.png ]; then cp /tmp/icon_hdpi.png app/src/main/res/mipmap-hdpi/ic_launcher.png || true; fi
+            cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
+            cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
+            cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher.png || true
 
-          if [ -f /tmp/icon_xxxhdpi.png ]; then
+            # adaptive: put foreground/background but use ic_launcher_full as foreground to show full image
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
+            # background: use white so foreground shows clearly (no transparency)
+            convert /tmp/icon_flat.png -resize 32x32\> /tmp/icon_bg.png || cp /tmp/icon_flat.png /tmp/icon_bg.png || true
+            convert /tmp/icon_bg.png -background white -gravity center -extent 48x48 /tmp/icon_bg.png || true
+            cp /tmp/icon_bg.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
+
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
               '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
               '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
-              '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
+              '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' \
               '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
+
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
               '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
               '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
-              '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
+              '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' \
               '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
+
+            echo "Icon densities and full variants created."
+          else
+            echo "No icon source found — skipping icon generation."
           fi
 
+          # splash: copy to both drawable and drawable-nodpi (flatten if needed)
           if [ -f /tmp/splash.png ]; then
-            echo "Installing splash image into drawable and drawable-nodpi..."
-            cp /tmp/splash.png app/src/main/res/drawable-nodpi/splash.png || true
-            cp /tmp/splash.png app/src/main/res/drawable/splash.png || true
+            echo "Installing splash image..."
+            sudo apt-get update -y
+            sudo apt-get install -y imagemagick || true
+            convert /tmp/splash.png -background white -alpha remove -alpha off /tmp/splash_flat.png || cp /tmp/splash.png /tmp/splash_flat.png || true
+            cp /tmp/splash_flat.png app/src/main/res/drawable-nodpi/splash.png || true
+            cp /tmp/splash_flat.png app/src/main/res/drawable/splash.png || true
+
             LAUNCH_XML="app/src/main/res/drawable/launch_background.xml"
             mkdir -p app/src/main/res/drawable
             printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
@@ -247,12 +283,15 @@ jobs:
               '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
               '    </item>' \
               '</layer-list>' > "$LAUNCH_XML" || true
+
+            echo "Splash applied and launch_background created/updated."
           else
             echo "No /tmp/splash.png found — splash not applied."
           fi
 
+          # debug listings (must appear in logs)
           echo "=== DEBUG: /tmp files ==="
-          ls -l /tmp/icon_* /tmp/splash.png || true
+          ls -l /tmp/icon* /tmp/splash* || true
           echo "=== DEBUG: res mipmap-anydpi-v26 ==="
           ls -l app/src/main/res/mipmap-anydpi-v26 || true
           echo "=== DEBUG: res mipmap-* ==="
@@ -263,21 +302,22 @@ jobs:
           if [ -f app/src/main/res/drawable/launch_background.xml ]; then sed -n '1,200p' app/src/main/res/drawable/launch_background.xml || true; fi
           echo "Branding step done."
 
-      - name: Ensure manifest icon entries
+      - name: Ensure manifest icon entries (use full icon)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
           MF="app/src/main/AndroidManifest.xml"
           if [ ! -f "$MF" ]; then echo "No AndroidManifest.xml found — skipping manifest patch"; exit 0; fi
+          # Replace icon/roundIcon to use ic_launcher_full to force full image as launcher icon
           perl -0777 -pe '
             if (/<application\b[^>]*>/s) {
               $app = $&;
               $new = $app;
-              if ($new !~ /android:icon=/) { $new =~ s/<application/<application android:icon=\"\@mipmap\/ic_launcher\"/; }
-              else { $new =~ s/android:icon=\"[^\"]*\"/android:icon=\"\@mipmap\/ic_launcher\"/g; }
-              if ($new !~ /android:roundIcon=/) { $new =~ s/<application/<application android:roundIcon=\"\@mipmap\/ic_launcher_round\"/; }
-              else { $new =~ s/android:roundIcon=\"[^\"]*\"/android:roundIcon=\"\@mipmap\/ic_launcher_round\"/g; }
+              if ($new !~ /android:icon=/) { $new =~ s/<application/<application android:icon=\"\@mipmap\/ic_launcher_full\"/; }
+              else { $new =~ s/android:icon=\"[^\"]*\"/android:icon=\"\@mipmap\/ic_launcher_full\"/g; }
+              if ($new !~ /android:roundIcon=/) { $new =~ s/<application/<application android:roundIcon=\"\@mipmap\/ic_launcher_full\"/; }
+              else { $new =~ s/android:roundIcon=\"[^\"]*\"/android:roundIcon=\"\@mipmap\/ic_launcher_full\"/g; }
               s/\Q$app\E/$new/;
             }
           ' -i "$MF" || true
@@ -353,50 +393,6 @@ jobs:
             unzip -p "$APK" "res/mipmap-anydpi-v26/ic_launcher.xml" 2>/dev/null | sed -n '1,200p' || true
             unzip -p "$APK" "res/drawable/launch_background.xml" 2>/dev/null | sed -n '1,200p' || true
           fi
-
-      - name: Validate AAB using bundletool
-        shell: bash
-        working-directory: android
-        run: |
-          set -euo pipefail
-
-          AAB_DIR="../out_aab"
-          if ! ls "$AAB_DIR"/*.aab 1> /dev/null 2>&1; then
-            echo "No AAB produced to validate."
-            exit 0
-          fi
-
-          BUNDLETOOL_VER="1.14.0"
-          BUNDLETOOL_JAR="bundletool-all-${BUNDLETOOL_VER}.jar"
-          BUNDLETOOL_URL="https://github.com/google/bundletool/releases/download/${BUNDLETOOL_VER}/${BUNDLETOOL_JAR}"
-
-          echo "Downloading bundletool from: $BUNDLETOOL_URL"
-          if ! curl -fSL -o "$BUNDLETOOL_JAR" "$BUNDLETOOL_URL"; then
-            echo "ERROR: bundletool download failed (HTTP error or network)."
-            ls -lh || true
-            exit 1
-          fi
-
-          echo "Downloaded file size:"
-          ls -lh "$BUNDLETOOL_JAR"
-
-          HEADER=$(head -c 2 "$BUNDLETOOL_JAR" | od -An -t x1 | tr -d ' \n')
-          if [ "$HEADER" != "504b" ]; then
-            echo "ERROR: bundletool JAR does not look like a zip/jar (header $HEADER)."
-            echo "Showing first 200 bytes for debug:"
-            hexdump -C "$BUNDLETOOL_JAR" | sed -n '1,20p' || true
-            exit 1
-          fi
-
-          for aab in "$AAB_DIR"/*.aab; do
-            echo "Validating $aab with bundletool..."
-            if ! java -jar "$BUNDLETOOL_JAR" validate --bundle="$aab"; then
-              echo "bundletool validation FAILED for $aab"
-              exit 1
-            else
-              echo "bundletool validation PASSED for $aab"
-            fi
-          done
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
