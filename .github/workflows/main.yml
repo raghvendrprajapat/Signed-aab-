@@ -1,518 +1,215 @@
-name: Build Web to Signed Android (no server.url, sanitize + force-bundle)
+name: Build web → Signed Android APK & AAB
 
 on:
+  push:
+    branches:
+      - main
+      - master
   workflow_dispatch:
-    inputs:
-      APP_NAME:
-        description: "App name"
-        required: true
-        default: "My Web2App"
-      APP_ID:
-        description: "Package ID (e.g. com.example.app)"
-        required: true
-        default: "com.example.web2app"
-      WEB_URL:
-        description: "URL to web code (zip recommended) or homepage"
-        required: true
-        default: "https://example.com/my-built-web.zip"
-      VERSION_NAME:
-        description: "Version name (e.g. 1.0.0)"
-        required: true
-        default: "1.0.0"
-      VERSION_CODE:
-        description: "Version code (integer)"
-        required: true
-        default: "1"
-      TARGET_SDK:
-        description: "Target/compile SDK"
-        required: true
-        default: "35"
-      ALLOW_MIXED_CONTENT:
-        description: "Allow http:// content? true/false"
-        required: true
-        default: "false"
-      PLUGINS:
-        description: "Extra native plugins (none/camera/push/location/all)"
-        required: true
-        type: choice
-        default: "none"
-        options:
-          - "none"
-          - "camera"
-          - "push"
-          - "location"
-          - "all"
-      APP_ICON_URL:
-        description: "Optional URL to icon folder or single png"
-        required: false
-        default: ""
-      SPLASH_SCREEN_URL:
-        description: "Optional URL to splash folder or single png"
-        required: false
-        default: ""
 
-permissions:
-  contents: read
+env:
+  # Use JAVA 17 for modern Android builds, alter if your project requires Java 11
+  JAVA_VERSION: 17
+  NODE_VERSION: 18
 
 jobs:
-  build:
+  build-android:
+    name: Build Web App & Android (APK + AAB)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-
-    env:
-      MIN_SDK: "22"
-
-      # keystore secrets (set in repo Settings -> Secrets)
-      KEYSTORE_BASE64:   ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-      KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
-      KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
-
-      APP_NAME: ${{ github.event.inputs.APP_NAME }}
-      APP_ID: ${{ github.event.inputs.APP_ID }}
-      WEB_URL: ${{ github.event.inputs.WEB_URL }}
-      VERSION_NAME: ${{ github.event.inputs.VERSION_NAME }}
-      VERSION_CODE: ${{ github.event.inputs.VERSION_CODE }}
-      TARGET_SDK: ${{ github.event.inputs.TARGET_SDK }}
-      ALLOW_MIXED_CONTENT: ${{ github.event.inputs.ALLOW_MIXED_CONTENT }}
-      PLUGINS: ${{ github.event.inputs.PLUGINS }}
-      APP_ICON_URL: ${{ github.event.inputs.APP_ICON_URL }}
-      SPLASH_SCREEN_URL: ${{ github.event.inputs.SPLASH_SCREEN_URL }}
-
+    permissions:
+      contents: read
+      packages: write
+      actions: read
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
 
-      - name: Set up Java 21
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Set up Node 20
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
 
-      #################################################################
-      # 1) Prepare web build (prefer repo build, else download WEB_URL)
-      #    -> writes WEB_BUILD_DIR to $GITHUB_ENV
-      #################################################################
-      - name: Prepare web build and set WEB_BUILD_DIR
-        shell: bash
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-cache-${{ runner.os }}-v1-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
+
+      - name: Install web dependencies
+        working-directory: ./   # change if web app is in a subfolder like ./web
         run: |
-          set -euo pipefail
-          echo "Preparing web build..."
-          BUILD_DIR=""
-
-          # try repo build first
-          if [ -f package.json ]; then
-            echo "Found package.json — installing deps"
-            if [ -f package-lock.json ]; then npm ci; else npm install; fi
-            if npm run | grep -q " build"; then
-              npm run build || true
-            fi
-            for d in dist build public; do
-              if [ -d "$d" ]; then
-                BUILD_DIR="$d"
-                echo "Using repo build directory: $BUILD_DIR"
-                break
-              fi
-            done
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f yarn.lock ]; then
+            npm ci
+          else
+            npm install
           fi
 
-          # if not present, try WEB_URL
-          if [ -z "$BUILD_DIR" ]; then
-            echo "Repo build not found — trying WEB_URL: ${WEB_URL}"
-            mkdir -p downloaded_www
-            if [[ "${ALLOW_MIXED_CONTENT}" != "true" && ! "${WEB_URL}" =~ ^https:// ]]; then
-              echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"; exit 1
-            fi
-
-            if [[ "${WEB_URL}" =~ \.zip$ ]]; then
-              echo "Downloading zip: ${WEB_URL}"
-              curl -fsSL "${WEB_URL}" -o /tmp/web_download.zip
-              unzip -q /tmp/web_download.zip -d downloaded_www || true
-            else
-              CT=$(curl -fsSLI -o /dev/null -w '%{content_type}' "${WEB_URL}" || true)
-              if [[ "${CT}" =~ zip ]]; then
-                curl -fsSL "${WEB_URL}" -o /tmp/web_download.zip
-                unzip -q /tmp/web_download.zip -d downloaded_www || true
-              else
-                echo "No zip detected; attempting wget mirror (may not capture JS SPAs)"
-                sudo apt-get update -y
-                sudo apt-get install -y wget || true
-                wget --mirror --no-parent --adjust-extension --convert-links --page-requisites --directory-prefix=downloaded_www --level=2 "${WEB_URL}" || true
-              fi
-            fi
-
-            FIRST_INDEX=$(find downloaded_www -type f -iname 'index.html' | head -n1 || true)
-            if [ -n "$FIRST_INDEX" ]; then
-              BUILD_DIR=$(dirname "$FIRST_INDEX")
-              echo "Found index at $FIRST_INDEX -> BUILD_DIR=$BUILD_DIR"
-            else
-              for d in downloaded_www/dist downloaded_www/build downloaded_www/public downloaded_www; do
-                if [ -d "$d" ] && [ "$(ls -A "$d" 2>/dev/null | wc -l)" -gt 0 ]; then
-                  BUILD_DIR="$d"
-                  echo "Fallback using $BUILD_DIR"
-                  break
-                fi
-              done
-            fi
-          fi
-
-          # final fallback
-          if [ -z "$BUILD_DIR" ]; then
-            mkdir -p minimal_www
-            printf '<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:2rem;">No web build found. Provide a zip of built web files or include build in repo.</body></html>\n' > minimal_www/index.html
-            BUILD_DIR="minimal_www"
-            echo "Fell back to minimal_www"
-          fi
-
-          echo "WEB_BUILD_DIR=$BUILD_DIR" >> $GITHUB_ENV
-          echo "BUILD_DIR (local) -> $BUILD_DIR"
-          ls -la "$BUILD_DIR" || true
-
-          npm install -D @capacitor/core @capacitor/cli @capacitor/android --no-audit --no-fund || true
-
-      #################################################################
-      # 2) Validate inputs & secrets
-      #################################################################
-      - name: Validate inputs & secrets
-        shell: bash
+      - name: Build web (production)
+        working-directory: ./
         run: |
-          set -euo pipefail
-          if [[ ! "${APP_ID}" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
-            echo "❌ APP_ID invalid: ${APP_ID}"; exit 1
+          # Try common build scripts
+          if npm run | grep -q "build"; then
+            npm run build --if-present
+          elif npm run | grep -q "prod"; then
+            npm run prod --if-present
+          else
+            # If the repo uses vite / react-scripts / next etc, attempt common commands
+            npm run build --if-present || true
           fi
-          if ! [[ "${VERSION_CODE}" =~ ^[0-9]+$ ]]; then
-            echo "❌ VERSION_CODE must be integer"; exit 1
-          fi
-          for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
-            if [ -z "${!var:-}" ]; then
-              echo "❌ Missing secret: ${var}"; exit 1
+        # The produced folder is commonly: build, dist, out, or public depending on framework
+
+      - name: Locate web build output
+        id: find_build
+        run: |
+          set -e
+          # common build folders
+          for d in build dist out public/www; do
+            if [ -d "$d" ]; then
+              echo "build_dir=$d" >> $GITHUB_OUTPUT
+              exit 0
             fi
           done
-
-      #################################################################
-      # 3) Restore keystore
-      #################################################################
-      - name: Restore keystore
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "${KEYSTORE_BASE64}" | base64 -d > android.keystore
-          ls -l android.keystore || true
-
-      #################################################################
-      # 4) Configure Capacitor (bundled) — IMPORTANT: NO server block
-      #################################################################
-      - name: Configure Capacitor (bundled)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${WEB_BUILD_DIR:-}" ]; then
-            echo "❌ WEB_BUILD_DIR not set — abort"; exit 1
-          fi
-          echo "Initializing Capacitor with webDir=${WEB_BUILD_DIR}"
-          npx cap init "${APP_NAME}" "${APP_ID}" --web-dir="${WEB_BUILD_DIR}" || true
-
-          printf '{\n' > capacitor.config.json
-          printf '  "appId": "%s",\n' "${APP_ID}" >> capacitor.config.json
-          printf '  "appName": "%s",\n' "${APP_NAME}" >> capacitor.config.json
-          printf '  "webDir": "%s",\n' "${WEB_BUILD_DIR}" >> capacitor.config.json
-          printf '  "bundledWebRuntime": false,\n' >> capacitor.config.json
-          printf '  "android": {\n' >> capacitor.config.json
-          if [ "${ALLOW_MIXED_CONTENT}" = "true" ]; then
-            printf '    "allowMixedContent": true\n' >> capacitor.config.json
-          else
-            printf '    "allowMixedContent": false\n' >> capacitor.config.json
-          fi
-          printf '  }\n' >> capacitor.config.json
-          printf '}\n' >> capacitor.config.json
-
-          if [ "${PLUGINS}" = "camera" ]; then npm install @capacitor/camera || true; fi
-          if [ "${PLUGINS}" = "push" ]; then npm install @capacitor/push-notifications || true; fi
-          if [ "${PLUGINS}" = "location" ]; then npm install @capacitor/geolocation || true; fi
-          if [ "${PLUGINS}" = "all" ]; then npm install @capacitor/camera @capacitor/push-notifications @capacitor/geolocation || true; fi
-
-          npx cap add android || true
-          npx cap sync android || true
-
-      #################################################################
-      # 4.5) Sanitize build: remove server blocks and strip localhost references
-      #################################################################
-      - name: Sanitize build: remove server/url + strip localhost in web files
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Sanitize step: remove server blocks and strip localhost references"
-
-          # remove server block from any capacitor config files (root or assets)
-          for cfg in capacitor.config.json capacitor.config.ts capacitor.config.mjs "android/app/src/main/assets/capacitor.config.json"; do
-            if [ -f "$cfg" ]; then
-              echo "Cleaning server block from $cfg"
-              perl -0777 -pe 's/"server"\s*:\s*\{.*?\},?//gs' -i "$cfg" || true
-              echo ">>> head of $cfg <<<"
-              sed -n '1,40p' "$cfg" || true
-            fi
-          done
-
-          echo "Searching for 'serverUrl' or 'localhost' mentions in android folder (debug)"
-          grep -RIn --binary-files=without-match -e "serverUrl" -e "localhost" android || true
-
-          if [ -z "${WEB_BUILD_DIR:-}" ]; then
-            echo "WEB_BUILD_DIR not set — abort sanitize"; exit 1
-          fi
-          SRC="$PWD/$WEB_BUILD_DIR"
-          echo "WEB_BUILD_DIR -> $SRC"
-          if [ ! -d "$SRC" ]; then
-            echo "Source build missing at $SRC"; exit 1
-          fi
-
-          echo "Listing possible localhost matches in build:"
-          grep -RIn --binary-files=without-match "localhost" "$SRC" || true
-
-          echo "Replacing http(s)://localhost[:port] occurrences with relative paths in .html .js .json .css"
-          find "$SRC" -type f \( -name '*.html' -o -name '*.htm' -o -name '*.js' -o -name '*.json' -o -name '*.css' \) -print0 \
-            | xargs -0 -n1 sed -i -E 's#https?://localhost(:[0-9]+)?##g' || true
-
-          echo "Verify localhost removed (quick grep)"
-          grep -RIn --binary-files=without-match "localhost" "$SRC" || true
-
-          # ensure index.html present and print top lines
-          if [ -f "$SRC/index.html" ]; then
-            echo "Found $SRC/index.html — first 40 lines:"
-            sed -n '1,40p' "$SRC/index.html" || true
-          else
-            FIDX=$(find "$SRC" -type f -iname 'index.html' | head -n1 || true)
-            if [ -n "$FIDX" ]; then
-              echo "Found index at $FIDX — printing first 40 lines"
-              sed -n '1,40p' "$FIDX" || true
-            else
-              echo "ERROR: index.html not found in WEB_BUILD_DIR ($SRC). Build will be blank."
-              echo "Contents of $SRC (top):"
-              ls -la "$SRC" | sed -n '1,200p' || true
-              exit 1
-            fi
-          fi
-
-          echo "Searching for JS redirects (window.location)"
-          grep -RIn --binary-files=without-match "window.location" "$SRC" || true
-
-          echo "Sanitize step finished."
-
-      #################################################################
-      # 5) FORCE-COPY: ensure web build is physically inside Android assets
-      #################################################################
-      - name: Force-copy web build into Android assets (all locations)
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC="$PWD/${WEB_BUILD_DIR:-}"
-          echo "SRC = $SRC"
-          if [ ! -d "$SRC" ]; then echo "❌ Source not found: $SRC"; exit 1; fi
-
-          DST1="android/app/src/main/assets/public"
-          DST2="android/app/src/main/assets/www"
-          DST3="android/app/src/main/assets"
-
-          for DST in "$DST1" "$DST2" "$DST3"; do
-            echo "--- Copying to $DST ---"
-            rm -rf "$DST"
-            mkdir -p "$DST"
-            if command -v rsync >/dev/null 2>&1; then
-              rsync -a --delete "$SRC"/ "$DST"/
-            else
-              cp -a "$SRC"/. "$DST"/ || true
-            fi
-            echo "Top of $DST:"
-            ls -la "$DST" | sed -n '1,200p' || true
-          done
-
-          if ! ( [ -f "$DST1/index.html" ] || [ -f "$DST2/index.html" ] || [ -f "$DST3/index.html" ] ); then
-            echo "⚠️ index.html not found in any asset location — app may be blank offline"
-          else
-            echo "✅ index.html present in asset(s)."
-          fi
-
-      #################################################################
-      # 6) Apply branding assets (optional)
-      #################################################################
-      - name: Apply branding assets from URL(s) (robust)
-        shell: bash
-        working-directory: android
-        run: |
-          set -euo pipefail
-          ICON_SRC="${APP_ICON_URL:-}"
-          SPLASH_SRC="${SPLASH_SCREEN_URL:-}"
-          if [ -z "$ICON_SRC" ] && [ -z "$SPLASH_SRC" ]; then
-            echo "No branding URLs provided — skipping branding download"
+          # check common frameworks:
+          if [ -d "www" ]; then
+            echo "build_dir=www" >> $GITHUB_OUTPUT
             exit 0
           fi
-
-          dl() { url="$1"; out="$2"; echo "curl -> $url -> $out"; curl -sfSL "$url" -o "$out" || { echo "curl failed for $url (ignored)"; }; }
-
-          if [ -n "$ICON_SRC" ]; then
-            if [[ "$ICON_SRC" =~ \.png$ ]]; then
-              dl "$ICON_SRC" /tmp/icon_src.png
-            else
-              case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
-              dl "${ICON_SRC}icon_xxxhdpi.png" /tmp/icon_src.png
-              if [ ! -f /tmp/icon_src.png ]; then dl "${ICON_SRC}icon.png" /tmp/icon_src.png; fi
-            fi
+          # fallback: try to detect anything with index.html
+          found=$(find . -maxdepth 3 -type f -name index.html -printf "%h\n" | head -n 1 || true)
+          if [ -n "$found" ]; then
+            echo "build_dir=$found" >> $GITHUB_OUTPUT
+            exit 0
           fi
+          echo "build_dir=" >> $GITHUB_OUTPUT
 
-          if [ -n "$SPLASH_SRC" ]; then
-            if [[ "$SPLASH_SRC" =~ \.png$ ]]; then
-              dl "$SPLASH_SRC" /tmp/splash.png
-            else
-              case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac
-              dl "${SPLASH_SRC}splash.png" /tmp/splash.png
-            fi
-          fi
+      - name: Print detected build dir
+        run: echo "Detected build dir: ${{ steps.find_build.outputs.build_dir }}"
 
-          rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
-          mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
-          mkdir -p app/src/main/res/mipmap-anydpi-v26 app/src/main/res/drawable app/src/main/res/drawable-nodpi
-
-          if [ -f /tmp/icon_src.png ]; then
-            sudo apt-get update -y
-            sudo apt-get install -y imagemagick || true
-            convert /tmp/icon_src.png -background white -alpha remove -alpha off /tmp/icon_flat.png || cp /tmp/icon_src.png /tmp/icon_flat.png || true
-            convert /tmp/icon_flat.png -resize 192x192\> /tmp/icon_xxxhdpi.png || true
-            convert /tmp/icon_flat.png -resize 144x144\> /tmp/icon_xxhdpi.png  || true
-            convert /tmp/icon_flat.png -resize 96x96\>   /tmp/icon_xhdpi.png   || true
-            convert /tmp/icon_flat.png -resize 72x72\>   /tmp/icon_hdpi.png    || true
-
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_full.png || true
-            cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher_full.png || true
-            cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher_full.png || true
-            cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher_full.png || true
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
-
-            convert /tmp/icon_flat.png -resize 32x32\> /tmp/icon_bg.png || cp /tmp/icon_flat.png /tmp/icon_bg.png || true
-            convert /tmp/icon_bg.png -background white -gravity center -extent 48x48 /tmp/icon_bg.png || true
-            cp /tmp/icon_bg.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_background.png || true
-
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@mipmap/ic_launcher_background"/>' '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml || true
-            cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
-          fi
-
-          if [ -f /tmp/splash.png ]; then
-            sudo apt-get update -y
-            sudo apt-get install -y imagemagick || true
-            convert /tmp/splash.png -background white -alpha remove -alpha off /tmp/splash_flat.png || cp /tmp/splash.png /tmp/splash_flat.png || true
-            cp /tmp/splash_flat.png app/src/main/res/drawable-nodpi/splash.png || true
-            cp /tmp/splash_flat.png app/src/main/res/drawable/splash.png || true
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<layer-list xmlns:android="http://schemas.android.com/apk/res/android">' '    <item android:drawable="@android:color/white" />' '    <item>' '        <bitmap android:gravity="center" android:src="@drawable/splash" />' '    </item>' '</layer-list>' > app/src/main/res/drawable/launch_background.xml || true
-          fi
-
-      #################################################################
-      # 7) Ensure manifest icon entries
-      #################################################################
-      - name: Ensure manifest icon entries (use full icon)
-        shell: bash
-        working-directory: android
+      - name: Fail early if no web build found
+        if: ${{ steps.find_build.outputs.build_dir == '' }}
         run: |
-          set -euo pipefail
-          MF="app/src/main/AndroidManifest.xml"
-          if [ -f "$MF" ]; then
-            perl -0777 -pe '
-              if (/<application\b[^>]*>/s) {
-                $app=$&; $new=$app;
-                if($new!~/android:icon=/){ $new=~s/<application/<application android:icon=\"\@mipmap\/ic_launcher_full\"/; } else { $new=~s/android:icon=\"[^\"]*\"/android:icon=\"\@mipmap\/ic_launcher_full\"/g; }
-                if($new!~/android:roundIcon=/){ $new=~s/<application/<application android:roundIcon=\"\@mipmap\/ic_launcher_full\"/; } else { $new=~s/android:roundIcon=\"[^\"]*\"/android:roundIcon=\"\@mipmap\/ic_launcher_full\"/g; }
-                s/\Q$app\E/$new/;
-              }
-            ' -i "$MF" || true
-            sed -n '1,80p' "$MF" || true
+          echo "No web build directory found. Make sure your project produces a production build (build/ dist/ out/ www etc)." >&2
+          exit 1
+
+      - name: Prepare Android keystore (from base64 secret)
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        run: |
+          mkdir -p android/app
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
+          # Create keystore.properties used by many Android Gradle configs
+          cat > android/keystore.properties <<EOF
+          storeFile=release.keystore
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          EOF
+          echo "Keystore and keystore.properties created."
+
+      - name: Copy web build into Android project (Capacitor / Cordova / TWA friendly)
+        run: |
+          WEBDIR="${{ steps.find_build.outputs.build_dir }}"
+          echo "Copying web assets from $WEBDIR into android project..."
+          # Common targets (try multiple standard places)
+          if [ -d "android" ]; then
+            # Capacitor 3+ uses app/src/main/assets/public
+            if [ -d "android/app/src/main/assets/public" ]; then
+              rm -rf android/app/src/main/assets/public/*
+              mkdir -p android/app/src/main/assets/public
+              cp -a "$WEBDIR/." android/app/src/main/assets/public/
+              echo "Copied to android/app/src/main/assets/public"
+            fi
+            # Cordova / some wrappers use android/app/src/main/assets/www
+            if [ -d "android/app/src/main/assets/www" ] || [ ! -d "android/app/src/main/assets/public" ]; then
+              rm -rf android/app/src/main/assets/www || true
+              mkdir -p android/app/src/main/assets/www
+              cp -a "$WEBDIR/." android/app/src/main/assets/www/
+              echo "Copied to android/app/src/main/assets/www"
+            fi
+            # Also copy to android/app/src/main/res/raw (TWA sometimes uses this)
+            mkdir -p android/app/src/main/res/raw
+            cp -a "$WEBDIR/." android/app/src/main/res/raw/
+            echo "Also copied to android/app/src/main/res/raw"
           else
-            echo "No AndroidManifest.xml found — skipping manifest patch"
+            echo "No android/ directory found in repo; skipping copy." >&2
+            exit 1
           fi
 
-      #################################################################
-      # 8) Patch Gradle for versioning & signing
-      #################################################################
-      - name: Patch Gradle for versioning & signing
-        shell: bash
-        working-directory: android
+      - name: Ensure Gradle wrapper executable
         run: |
-          set -euo pipefail
-          cp ../android.keystore app/release.keystore || true
-          if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
-          sed -i -E "s/versionCode[ =]+[0-9]+/versionCode ${VERSION_CODE}/" "$FILE" || true
-          sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"${VERSION_NAME}\"/" "$FILE" || true
-          sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion ${MIN_SDK}/" "$FILE" || true
-          sed -i -E "s/minSdk[ =]+[0-9]+/minSdk ${MIN_SDK}/" "$FILE" || true
-          sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion ${TARGET_SDK}/" "$FILE" || true
-          sed -i -E "s/targetSdk[ =]+[0-9]+/targetSdk ${TARGET_SDK}/" "$FILE" || true
-          sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion ${TARGET_SDK}/" "$FILE" || true
-          sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk ${TARGET_SDK}/" "$FILE" || true
+          chmod +x ./android/gradlew
 
-          if ! grep -q "signingConfigs" "$FILE"; then
-            {
-              echo ""
-              echo "android {"
-              echo "    signingConfigs {"
-              echo "        release {"
-              echo "            storeFile file(\"release.keystore\")"
-              echo "            storePassword System.getenv(\"KEYSTORE_PASSWORD\")"
-              echo "            keyAlias      System.getenv(\"KEY_ALIAS\")"
-              echo "            keyPassword   System.getenv(\"KEY_PASSWORD\")"
-              echo "        }"
-              echo "    }"
-              echo "    buildTypes {"
-              echo "        release {"
-              echo "            signingConfig signingConfigs.release"
-              echo "            minifyEnabled false"
-              echo "            shrinkResources false"
-              echo "            debuggable false"
-              echo "        }"
-              echo "    }"
-              echo "}"
-            } >> "$FILE"
-          fi
-
-      #################################################################
-      # 9) Build release AAB + APK and inspect for index.html
-      #################################################################
-      - name: Build release AAB + APK
-        shell: bash
-        working-directory: android
+      - name: Build Android release (AAB and APK)
+        working-directory: ./android
+        env:
+          ANDROID_HOME: /opt/android-sdk
+          JAVA_HOME: ${{ runner.temp }}/jdk
         run: |
-          set -euo pipefail
-          ./gradlew clean --no-daemon
-          ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon || true
+          set -e
+          # Print basic diagnostics
+          echo "Gradle version:"
+          ./gradlew --version
 
-          mkdir -p ../out_aab ../out_apk
-          cp app/build/outputs/bundle/release/*.aab ../out_aab/ || true
-          cp app/build/outputs/apk/release/*.apk ../out_apk/   || true
+          # Clean build
+          ./gradlew clean
 
-          echo "=== AAB files ==="; ls -la ../out_aab || true
-          echo "=== APK files ==="; ls -la ../out_apk || true
+          # Build both bundle and apk release variants (assembleRelease and bundleRelease)
+          # If signing is configured in the project's Gradle files and keystore.properties exists,
+          # the produced artifacts will be signed. If not, artifacts will be unsigned.
+          ./gradlew bundleRelease -x lint || true
+          ./gradlew assembleRelease -x lint || true
 
-          if ls ../out_apk/*.apk 1> /dev/null 2>&1; then
-            for A in ../out_apk/*.apk; do
-              echo "---- Listing $A ----"
-              unzip -l "$A" | sed -n '1,200p' || true
-              echo "---- Try assets/public/index.html ----"
-              unzip -p "$A" "assets/public/index.html" 2>/dev/null | sed -n '1,80p' || true
-              echo "---- Try assets/www/index.html ----"
-              unzip -p "$A" "assets/www/index.html" 2>/dev/null | sed -n '1,80p' || true
-              echo "---- Try assets/index.html ----"
-              unzip -p "$A" "assets/index.html" 2>/dev/null | sed -n '1,80p' || true
+          # Locate produced artifacts
+          echo "Searching for produced artifacts..."
+          find . -type f -path "*/outputs/*.aab" -o -path "*/outputs/*release*.apk" -print || true
+
+      - name: Sign APK (if unsigned) and align — best-effort fallback
+        working-directory: ./android
+        if: always()
+        run: |
+          set -e
+          OUTPUTS_DIR="./app/build/outputs"
+          mkdir -p $OUTPUTS_DIR/gha
+          # find unsigned APKs (release)
+          unsigned_apks=$(find app/build/outputs -type f -name "*release-unsigned*.apk" -o -name "*-unsigned.apk" -o -name "*release.apk" | tr '\n' ' ')
+          echo "Unsigned candidate apks: $unsigned_apks"
+          # If keystore was provided, try jarsigner+apksigner flow for APKs
+          if [ -f release.keystore ]; then
+            for apk in $(find app/build/outputs -type f -name "*release-unsigned*.apk" -o -name "*-unsigned.apk"); do
+              echo "Signing $apk"
+              jarsigner -verbose -sigalg SHA1withRSA -digestalg SHA1 -keystore release.keystore -storepass "${{ secrets.KEYSTORE_PASSWORD }}" -keypass "${{ secrets.KEY_PASSWORD }}" "$apk" "${{ secrets.KEY_ALIAS }}" || true
+              # Align and move to gha folder (apksigner comes with Android SDK build tools)
+              if command -v zipalign >/dev/null 2>&1; then
+                ZIPALIGNED="${apk%.apk}-aligned.apk"
+                zipalign -v -p 4 "$apk" "$ZIPALIGNED" || true
+                mv "$ZIPALIGNED" "$OUTPUTS_DIR/gha/$(basename "$ZIPALIGNED")"
+              else
+                cp "$apk" "$OUTPUTS_DIR/gha/$(basename "$apk")"
+              fi
             done
+          else
+            echo "No keystore found — skipping explicit jarsigner step (Gradle signing may already have produced signed artifacts)."
           fi
 
-      - name: Upload signed AAB
-        uses: actions/upload-artifact@v4
-        with:
-          name: signed-aab
-          path: out_aab
+          # Copy any produced .aab and .apk to outputs directory for artifact upload
+          find . -type f -name "*.aab" -o -name "*release*.apk" -exec cp {} $OUTPUTS_DIR/gha/ \; || true
+          ls -lah $OUTPUTS_DIR/gha || true
 
-      - name: Upload signed APK
+      - name: Upload artifacts (signed or produced)
         uses: actions/upload-artifact@v4
         with:
-          name: signed-apk
-          path: out_apk
+          name: android-releases
+          path: android/app/build/outputs/gha
