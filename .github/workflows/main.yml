@@ -1,4 +1,4 @@
-name: Build Offline Android App
+name: Web to Android Offline
 
 on:
   workflow_dispatch:
@@ -16,11 +16,11 @@ on:
         required: true
         default: "https://example.com"
       VERSION_NAME:
-        description: "Version"
+        description: "Version (e.g. 1.0.0)"
         required: true
         default: "1.0.0"
       VERSION_CODE:
-        description: "Version code"
+        description: "Version code (integer)"
         required: true
         default: "1"
       TARGET_SDK:
@@ -28,7 +28,7 @@ on:
         required: true
         default: "35"
       DOWNLOAD_DEPTH:
-        description: "Crawl depth"
+        description: "Crawl depth (1-3)"
         required: true
         default: "2"
 
@@ -49,10 +49,6 @@ jobs:
       TARGET_SDK: ${{ github.event.inputs.TARGET_SDK }}
       MIN_SDK: "22"
       DOWNLOAD_DEPTH: ${{ github.event.inputs.DOWNLOAD_DEPTH }}
-      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -69,94 +65,112 @@ jobs:
         with:
           node-version: 20
 
-      - name: Download website
+      - name: Download Website
         run: |
-          sudo apt-get update -y
+          sudo apt-get update -qq
           sudo apt-get install -y wget
-          mkdir -p website
-          cd website
-          wget --recursive --level=${{ github.event.inputs.DOWNLOAD_DEPTH }} --no-parent --convert-links --page-requisites --no-host-directories --restrict-file-names=windows --timeout=30 --tries=3 "${{ github.event.inputs.WEB_URL }}" || true
+          mkdir -p offline_website
+          cd offline_website
+          wget --recursive --level="${DOWNLOAD_DEPTH}" --no-parent --convert-links --adjust-extension --page-requisites --no-host-directories --restrict-file-names=windows --reject="*.exe,*.dmg,*.zip,*.pdf" --timeout=30 --tries=2 "${WEB_URL}" || true
           if [ ! -f index.html ]; then
-            echo '<html><body><h1>Offline App</h1></body></html>' > index.html
+            echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>App</title></head><body style="font-family:sans-serif;text-align:center;padding:50px"><h1>Offline App</h1><p>Content loaded</p></body></html>' > index.html
           fi
           cd ..
-          echo "WEB_DIR=website" >> $GITHUB_ENV
+          echo "WEB_BUILD_DIR=offline_website" >> $GITHUB_ENV
 
       - name: Install Capacitor
         run: |
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
-      - name: Validate secrets
+      - name: Validate Inputs
         run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then echo "Missing ANDROID_KEYSTORE_BASE64"; exit 1; fi
-          if [ -z "$KEYSTORE_PASSWORD" ]; then echo "Missing KEYSTORE_PASSWORD"; exit 1; fi
-          if [ -z "$KEY_ALIAS" ]; then echo "Missing KEY_ALIAS"; exit 1; fi
-          if [ -z "$KEY_PASSWORD" ]; then echo "Missing KEY_PASSWORD"; exit 1; fi
+          if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
+            echo "Invalid APP_ID"
+            exit 1
+          fi
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "Missing ANDROID_KEYSTORE_BASE64 secret"
+            exit 1
+          fi
 
-      - name: Restore keystore
+      - name: Restore Keystore
         run: |
-          echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android.keystore
           ls -lh android.keystore
 
       - name: Configure Capacitor
         run: |
-          npx cap init "$APP_NAME" "$APP_ID" --web-dir=website
+          npx cap init "${APP_NAME}" "${APP_ID}" --web-dir="${WEB_BUILD_DIR}" || true
           cat > capacitor.config.json << 'ENDCONFIG'
           {
             "appId": "REPLACE_APP_ID",
             "appName": "REPLACE_APP_NAME",
-            "webDir": "website",
+            "webDir": "REPLACE_WEB_DIR",
             "bundledWebRuntime": true,
             "android": {
               "allowMixedContent": false
             }
           }
           ENDCONFIG
-          sed -i "s/REPLACE_APP_ID/$APP_ID/g" capacitor.config.json
-          sed -i "s/REPLACE_APP_NAME/$APP_NAME/g" capacitor.config.json
-          npx cap add android
+          sed -i "s|REPLACE_APP_ID|${APP_ID}|g" capacitor.config.json
+          sed -i "s|REPLACE_APP_NAME|${APP_NAME}|g" capacitor.config.json
+          sed -i "s|REPLACE_WEB_DIR|${WEB_BUILD_DIR}|g" capacitor.config.json
+          cat capacitor.config.json
+          npx cap add android || true
           npx cap sync android
 
       - name: Configure Gradle
         working-directory: android
         run: |
           cp ../android.keystore app/release.keystore
-          BUILD_FILE="app/build.gradle"
-          sed -i "s/versionCode .*/versionCode $VERSION_CODE/" "$BUILD_FILE"
-          sed -i "s/versionName .*/versionName \"$VERSION_NAME\"/" "$BUILD_FILE"
-          sed -i "s/minSdk .*/minSdk $MIN_SDK/" "$BUILD_FILE"
-          sed -i "s/targetSdk .*/targetSdk $TARGET_SDK/" "$BUILD_FILE"
-          sed -i "s/compileSdk .*/compileSdk $TARGET_SDK/" "$BUILD_FILE"
-          echo "" >> "$BUILD_FILE"
-          echo "android {" >> "$BUILD_FILE"
-          echo "    signingConfigs {" >> "$BUILD_FILE"
-          echo "        release {" >> "$BUILD_FILE"
-          echo "            storeFile file('release.keystore')" >> "$BUILD_FILE"
-          echo "            storePassword System.getenv('KEYSTORE_PASSWORD')" >> "$BUILD_FILE"
-          echo "            keyAlias System.getenv('KEY_ALIAS')" >> "$BUILD_FILE"
-          echo "            keyPassword System.getenv('KEY_PASSWORD')" >> "$BUILD_FILE"
-          echo "        }" >> "$BUILD_FILE"
-          echo "    }" >> "$BUILD_FILE"
-          echo "    buildTypes {" >> "$BUILD_FILE"
-          echo "        release {" >> "$BUILD_FILE"
-          echo "            signingConfig signingConfigs.release" >> "$BUILD_FILE"
-          echo "        }" >> "$BUILD_FILE"
-          echo "    }" >> "$BUILD_FILE"
-          echo "}" >> "$BUILD_FILE"
+          FILE="app/build.gradle"
+          sed -i "s/versionCode [0-9]*/versionCode ${VERSION_CODE}/" "$FILE"
+          sed -i "s/versionName \"[^\"]*\"/versionName \"${VERSION_NAME}\"/" "$FILE"
+          sed -i "s/minSdk [0-9]*/minSdk ${MIN_SDK}/" "$FILE"
+          sed -i "s/targetSdk [0-9]*/targetSdk ${TARGET_SDK}/" "$FILE"
+          sed -i "s/compileSdk [0-9]*/compileSdk ${TARGET_SDK}/" "$FILE"
+          if ! grep -q "signingConfigs" "$FILE"; then
+            cat >> "$FILE" << 'ENDGRADLE'
+          
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("release.keystore")
+                      storePassword System.getenv("KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("KEY_ALIAS")
+                      keyPassword System.getenv("KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          ENDGRADLE
+          fi
 
       - name: Build APK and AAB
         working-directory: android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           ./gradlew clean --no-daemon
           ./gradlew assembleRelease bundleRelease --no-daemon
-          mkdir -p ../output
-          cp app/build/outputs/apk/release/*.apk ../output/ || true
-          cp app/build/outputs/bundle/release/*.aab ../output/ || true
-          ls -lh ../output/
+          mkdir -p ../output/apk ../output/aab
+          cp app/build/outputs/apk/release/*.apk ../output/apk/ || true
+          cp app/build/outputs/bundle/release/*.aab ../output/aab/ || true
 
-      - name: Upload artifacts
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: android-builds
-          path: output
-          retention-days: 30
+          name: app-release-apk
+          path: output/apk
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab
+          path: output/aab
