@@ -94,10 +94,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Install deps and build web if web project exists
+          # Install dependencies and build web if project exists
           if [ -f package.json ]; then
-            if [ -f package-lock.json ]; then npm ci; else npm install; fi
-            if npm run | grep -q " build"; then npm run build || true; fi
+            if [ -f package-lock.json ]; then
+              npm ci
+            else
+              npm install
+            fi
+            if npm run | grep -q " build"; then
+              npm run build || true
+            fi
             for d in dist build public; do
               if [ -d "$d" ]; then
                 echo "WEB_BUILD_DIR=$d" >> $GITHUB_ENV
@@ -106,7 +112,7 @@ jobs:
             done
           fi
 
-          # fallback minimal page if no build found
+          # Fallback minimal page if no build found
           if ! grep -q WEB_BUILD_DIR $GITHUB_ENV 2>/dev/null; then
             mkdir -p minimal_www
             printf '<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:2rem;">Loading…</body></html>\n' > minimal_www/index.html
@@ -120,17 +126,21 @@ jobs:
         run: |
           set -euo pipefail
           if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
-            echo "❌ APP_ID invalid: $APP_ID"; exit 1
+            echo "❌ APP_ID invalid: $APP_ID"
+            exit 1
           fi
           if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
-            echo "❌ VERSION_CODE must be integer"; exit 1
+            echo "❌ VERSION_CODE must be integer"
+            exit 1
           fi
           if [[ "$ALLOW_MIXED_CONTENT" != "true" && ! "$WEB_URL" =~ ^https:// ]]; then
-            echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"; exit 1
+            echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"
+            exit 1
           fi
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then
-              echo "❌ Missing secret: $var"; exit 1
+              echo "❌ Missing secret: $var"
+              exit 1
             fi
           done
 
@@ -180,9 +190,9 @@ jobs:
   }
 }
 CFG
-          sed -i "s/__APP_ID__/${APP_ID//\//\\/}/g" capacitor.config.json
-          sed -i "s/__APP_NAME__/${APP_NAME//\//\\/}/g" capacitor.config.json
-          sed -i "s/__WEB_DIR__/${WEB_BUILD_DIR//\//\\/}/g" capacitor.config.json
+          sed -i "s#__APP_ID__#${APP_ID}#g" capacitor.config.json
+          sed -i "s#__APP_NAME__#${APP_NAME}#g" capacitor.config.json
+          sed -i "s#__WEB_DIR__#${WEB_BUILD_DIR}#g" capacitor.config.json
 
           if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then
             sed -i "s/__CLEAR_TEXT__/true/g" capacitor.config.json
@@ -327,7 +337,11 @@ CFG
         run: |
           set -euo pipefail
           cp ../android.keystore app/release.keystore
-          if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
+          if [ -f app/build.gradle ]; then
+            FILE="app/build.gradle"
+          else
+            FILE="app/build.gradle.kts"
+          fi
 
           sed -i -E "s/versionCode[[:space:]]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
           sed -i -E "s/versionName[[:space:]]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
