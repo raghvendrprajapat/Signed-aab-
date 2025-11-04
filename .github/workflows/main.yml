@@ -56,7 +56,6 @@ jobs:
 
       - name: Build web (production)
         run: |
-          # run build script if present
           npm run build --if-present
 
       - name: Find web build directory
@@ -82,24 +81,20 @@ jobs:
           echo "No web build directory found (build|dist|out|public|www). Aborting."
           exit 1
 
-      - name: Prepare Android keystore (safe check inside script)
+      - name: Prepare Android keystore (safe shell check)
         run: |
-          # This step intentionally checks the secret inside the shell so the workflow parser
-          # does not need to evaluate 'secrets' in an expression (avoids validator errors).
+          # Check secret inside shell to avoid using 'secrets' in step-level 'if:' expressions.
           if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "ANDROID_KEYSTORE_BASE64 present — creating keystore files..."
             mkdir -p android/app
-            echo "Decoding keystore from secret..."
             echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
-            # write keystore.properties (placed at android/keystore.properties or android/app/keystore.properties depending on your Gradle)
-            cat > android/keystore.properties <<EOF
-storeFile=release.keystore
-storePassword=${{ secrets.KEYSTORE_PASSWORD }}
-keyAlias=${{ secrets.KEY_ALIAS }}
-keyPassword=${{ secrets.KEY_PASSWORD }}
-EOF
-            # Also put a copy next to app (some projects expect android/app/keystore.properties)
+            # Write keystore.properties (format many Gradle configs expect)
+            printf 'storeFile=release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+              "${{ secrets.KEYSTORE_PASSWORD }}" "${{ secrets.KEY_ALIAS }}" "${{ secrets.KEY_PASSWORD }}" \
+              > android/keystore.properties
+            # Provide a copy next to the app folder too (some projects expect android/app/keystore.properties)
             cp android/keystore.properties android/app/keystore.properties || true
-            echo "Keystore and keystore.properties created."
+            echo "Keystore created at android/app/release.keystore and keystore.properties written."
           else
             echo "ANDROID_KEYSTORE_BASE64 secret is empty or not set — skipping keystore creation."
           fi
@@ -141,10 +136,10 @@ EOF
           set -e
           ./gradlew --version || true
           ./gradlew clean
-          # Build bundle and apk. Gradle signing will sign if keystore properties are configured.
+          # Build bundle and apk. If keystore.properties is present and Gradle configured, builds will be signed.
           ./gradlew bundleRelease -x lint || true
           ./gradlew assembleRelease -x lint || true
-          # Debug listing of outputs
+          # List outputs for debugging
           find app/build/outputs -type f -name "*.aab" -o -name "*release*.apk" -print || true
 
       - name: Collect artifacts into outputs/gha
