@@ -13,7 +13,7 @@ env:
 
 jobs:
   build-android:
-    name: Build Web App & Android (APK + AAB)
+    name: Build Web & Android (APK + AAB)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -56,6 +56,7 @@ jobs:
 
       - name: Build web (production)
         run: |
+          # run build script if present
           npm run build --if-present
 
       - name: Find web build directory
@@ -75,63 +76,78 @@ jobs:
           fi
           echo "build_dir=" >> $GITHUB_OUTPUT
 
-      - name: Fail if web build not found
+      - name: Fail early if no web build found
         if: ${{ steps.find_build.outputs.build_dir == '' }}
         run: |
           echo "No web build directory found (build|dist|out|public|www). Aborting."
           exit 1
 
-      - name: Prepare Android keystore (from base64)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+      - name: Prepare Android keystore (safe check inside script)
         run: |
-          mkdir -p android/app
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
-          cat > android/app/keystore.properties <<EOF
-          storeFile=release.keystore
-          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
-          keyAlias=${{ secrets.KEY_ALIAS }}
-          keyPassword=${{ secrets.KEY_PASSWORD }}
-          EOF
-          echo "Keystore created at android/app/release.keystore"
+          # This step intentionally checks the secret inside the shell so the workflow parser
+          # does not need to evaluate 'secrets' in an expression (avoids validator errors).
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            mkdir -p android/app
+            echo "Decoding keystore from secret..."
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
+            # write keystore.properties (placed at android/keystore.properties or android/app/keystore.properties depending on your Gradle)
+            cat > android/keystore.properties <<EOF
+storeFile=release.keystore
+storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+keyAlias=${{ secrets.KEY_ALIAS }}
+keyPassword=${{ secrets.KEY_PASSWORD }}
+EOF
+            # Also put a copy next to app (some projects expect android/app/keystore.properties)
+            cp android/keystore.properties android/app/keystore.properties || true
+            echo "Keystore and keystore.properties created."
+          else
+            echo "ANDROID_KEYSTORE_BASE64 secret is empty or not set — skipping keystore creation."
+          fi
 
-      - name: Copy web build into Android project
+      - name: Copy web build into Android project (bundle all code)
         run: |
           WEBDIR="${{ steps.find_build.outputs.build_dir }}"
           if [ -z "$WEBDIR" ]; then
             echo "No web build dir set"; exit 1
           fi
-          # Copy to Capacitor public location if exists
-          if [ -d android/app/src/main/assets/public ]; then
-            rm -rf android/app/src/main/assets/public
-            mkdir -p android/app/src/main/assets/public
-            cp -a "$WEBDIR/." android/app/src/main/assets/public/
-            echo "Copied to android/app/src/main/assets/public"
+          if [ -d android ]; then
+            # Capacitor public
+            if [ -d android/app/src/main/assets/public ]; then
+              rm -rf android/app/src/main/assets/public
+              mkdir -p android/app/src/main/assets/public
+              cp -a "$WEBDIR/." android/app/src/main/assets/public/
+              echo "Copied web build to android/app/src/main/assets/public"
+            fi
+            # Cordova / fallback assets/www
+            rm -rf android/app/src/main/assets/www || true
+            mkdir -p android/app/src/main/assets/www
+            cp -a "$WEBDIR/." android/app/src/main/assets/www/
+            echo "Copied web build to android/app/src/main/assets/www"
+            # Also copy to res/raw for TWA or other setups
+            mkdir -p android/app/src/main/res/raw
+            cp -a "$WEBDIR/." android/app/src/main/res/raw/
+            echo "Also copied web build to android/app/src/main/res/raw"
+          else
+            echo "android/ directory not found in repo; aborting." >&2
+            exit 1
           fi
-          # Always ensure assets/www exists (Cordova / wrappers)
-          rm -rf android/app/src/main/assets/www || true
-          mkdir -p android/app/src/main/assets/www
-          cp -a "$WEBDIR/." android/app/src/main/assets/www/
-          echo "Copied to android/app/src/main/assets/www"
-          # Also a safe copy to res/raw (TWA or custom setups)
-          mkdir -p android/app/src/main/res/raw
-          cp -a "$WEBDIR/." android/app/src/main/res/raw/
-          echo "Also copied to android/app/src/main/res/raw"
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
 
-      - name: Build Android artifacts
+      - name: Build Android artifacts (AAB + APK)
         working-directory: android
         run: |
           set -e
+          ./gradlew --version || true
           ./gradlew clean
-          # Build AAB (bundle) and APK (assemble). Signing is performed by Gradle if build.gradle reads keystore.properties.
+          # Build bundle and apk. Gradle signing will sign if keystore properties are configured.
           ./gradlew bundleRelease -x lint || true
           ./gradlew assembleRelease -x lint || true
-          # Show artifacts for debugging
+          # Debug listing of outputs
           find app/build/outputs -type f -name "*.aab" -o -name "*release*.apk" -print || true
 
-      - name: Collect artifacts
+      - name: Collect artifacts into outputs/gha
         run: |
           mkdir -p android/app/build/outputs/gha
           find android -type f -name "*.aab" -o -name "*release*.apk" -exec cp {} android/app/build/outputs/gha/ \; || true
