@@ -8,9 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  # Use JAVA 17 for modern Android builds, alter if your project requires Java 11
-  JAVA_VERSION: 17
-  NODE_VERSION: 18
+  JAVA_VERSION: '17'
+  NODE_VERSION: '18'
 
 jobs:
   build-android:
@@ -18,16 +17,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
-      actions: read
-    steps:
 
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: Setup JDK
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -48,7 +45,6 @@ jobs:
           key: gradle-cache-${{ runner.os }}-v1-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
 
       - name: Install web dependencies
-        working-directory: ./   # change if web app is in a subfolder like ./web
         run: |
           if [ -f package-lock.json ]; then
             npm ci
@@ -59,36 +55,19 @@ jobs:
           fi
 
       - name: Build web (production)
-        working-directory: ./
         run: |
-          # Try common build scripts
-          if npm run | grep -q "build"; then
-            npm run build --if-present
-          elif npm run | grep -q "prod"; then
-            npm run prod --if-present
-          else
-            # If the repo uses vite / react-scripts / next etc, attempt common commands
-            npm run build --if-present || true
-          fi
-        # The produced folder is commonly: build, dist, out, or public depending on framework
+          npm run build --if-present
 
-      - name: Locate web build output
+      - name: Find web build directory
         id: find_build
         run: |
           set -e
-          # common build folders
-          for d in build dist out public/www; do
+          for d in build dist out public www; do
             if [ -d "$d" ]; then
               echo "build_dir=$d" >> $GITHUB_OUTPUT
               exit 0
             fi
           done
-          # check common frameworks:
-          if [ -d "www" ]; then
-            echo "build_dir=www" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          # fallback: try to detect anything with index.html
           found=$(find . -maxdepth 3 -type f -name index.html -printf "%h\n" | head -n 1 || true)
           if [ -n "$found" ]; then
             echo "build_dir=$found" >> $GITHUB_OUTPUT
@@ -96,119 +75,69 @@ jobs:
           fi
           echo "build_dir=" >> $GITHUB_OUTPUT
 
-      - name: Print detected build dir
-        run: echo "Detected build dir: ${{ steps.find_build.outputs.build_dir }}"
-
-      - name: Fail early if no web build found
+      - name: Fail if web build not found
         if: ${{ steps.find_build.outputs.build_dir == '' }}
         run: |
-          echo "No web build directory found. Make sure your project produces a production build (build/ dist/ out/ www etc)." >&2
+          echo "No web build directory found (build|dist|out|public|www). Aborting."
           exit 1
 
-      - name: Prepare Android keystore (from base64 secret)
+      - name: Prepare Android keystore (from base64)
         if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         run: |
           mkdir -p android/app
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
-          # Create keystore.properties used by many Android Gradle configs
-          cat > android/keystore.properties <<EOF
+          cat > android/app/keystore.properties <<EOF
           storeFile=release.keystore
           storePassword=${{ secrets.KEYSTORE_PASSWORD }}
           keyAlias=${{ secrets.KEY_ALIAS }}
           keyPassword=${{ secrets.KEY_PASSWORD }}
           EOF
-          echo "Keystore and keystore.properties created."
+          echo "Keystore created at android/app/release.keystore"
 
-      - name: Copy web build into Android project (Capacitor / Cordova / TWA friendly)
+      - name: Copy web build into Android project
         run: |
           WEBDIR="${{ steps.find_build.outputs.build_dir }}"
-          echo "Copying web assets from $WEBDIR into android project..."
-          # Common targets (try multiple standard places)
-          if [ -d "android" ]; then
-            # Capacitor 3+ uses app/src/main/assets/public
-            if [ -d "android/app/src/main/assets/public" ]; then
-              rm -rf android/app/src/main/assets/public/*
-              mkdir -p android/app/src/main/assets/public
-              cp -a "$WEBDIR/." android/app/src/main/assets/public/
-              echo "Copied to android/app/src/main/assets/public"
-            fi
-            # Cordova / some wrappers use android/app/src/main/assets/www
-            if [ -d "android/app/src/main/assets/www" ] || [ ! -d "android/app/src/main/assets/public" ]; then
-              rm -rf android/app/src/main/assets/www || true
-              mkdir -p android/app/src/main/assets/www
-              cp -a "$WEBDIR/." android/app/src/main/assets/www/
-              echo "Copied to android/app/src/main/assets/www"
-            fi
-            # Also copy to android/app/src/main/res/raw (TWA sometimes uses this)
-            mkdir -p android/app/src/main/res/raw
-            cp -a "$WEBDIR/." android/app/src/main/res/raw/
-            echo "Also copied to android/app/src/main/res/raw"
-          else
-            echo "No android/ directory found in repo; skipping copy." >&2
-            exit 1
+          if [ -z "$WEBDIR" ]; then
+            echo "No web build dir set"; exit 1
           fi
+          # Copy to Capacitor public location if exists
+          if [ -d android/app/src/main/assets/public ]; then
+            rm -rf android/app/src/main/assets/public
+            mkdir -p android/app/src/main/assets/public
+            cp -a "$WEBDIR/." android/app/src/main/assets/public/
+            echo "Copied to android/app/src/main/assets/public"
+          fi
+          # Always ensure assets/www exists (Cordova / wrappers)
+          rm -rf android/app/src/main/assets/www || true
+          mkdir -p android/app/src/main/assets/www
+          cp -a "$WEBDIR/." android/app/src/main/assets/www/
+          echo "Copied to android/app/src/main/assets/www"
+          # Also a safe copy to res/raw (TWA or custom setups)
+          mkdir -p android/app/src/main/res/raw
+          cp -a "$WEBDIR/." android/app/src/main/res/raw/
+          echo "Also copied to android/app/src/main/res/raw"
 
-      - name: Ensure Gradle wrapper executable
-        run: |
-          chmod +x ./android/gradlew
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
 
-      - name: Build Android release (AAB and APK)
-        working-directory: ./android
-        env:
-          ANDROID_HOME: /opt/android-sdk
-          JAVA_HOME: ${{ runner.temp }}/jdk
+      - name: Build Android artifacts
+        working-directory: android
         run: |
           set -e
-          # Print basic diagnostics
-          echo "Gradle version:"
-          ./gradlew --version
-
-          # Clean build
           ./gradlew clean
-
-          # Build both bundle and apk release variants (assembleRelease and bundleRelease)
-          # If signing is configured in the project's Gradle files and keystore.properties exists,
-          # the produced artifacts will be signed. If not, artifacts will be unsigned.
+          # Build AAB (bundle) and APK (assemble). Signing is performed by Gradle if build.gradle reads keystore.properties.
           ./gradlew bundleRelease -x lint || true
           ./gradlew assembleRelease -x lint || true
+          # Show artifacts for debugging
+          find app/build/outputs -type f -name "*.aab" -o -name "*release*.apk" -print || true
 
-          # Locate produced artifacts
-          echo "Searching for produced artifacts..."
-          find . -type f -path "*/outputs/*.aab" -o -path "*/outputs/*release*.apk" -print || true
-
-      - name: Sign APK (if unsigned) and align — best-effort fallback
-        working-directory: ./android
-        if: always()
+      - name: Collect artifacts
         run: |
-          set -e
-          OUTPUTS_DIR="./app/build/outputs"
-          mkdir -p $OUTPUTS_DIR/gha
-          # find unsigned APKs (release)
-          unsigned_apks=$(find app/build/outputs -type f -name "*release-unsigned*.apk" -o -name "*-unsigned.apk" -o -name "*release.apk" | tr '\n' ' ')
-          echo "Unsigned candidate apks: $unsigned_apks"
-          # If keystore was provided, try jarsigner+apksigner flow for APKs
-          if [ -f release.keystore ]; then
-            for apk in $(find app/build/outputs -type f -name "*release-unsigned*.apk" -o -name "*-unsigned.apk"); do
-              echo "Signing $apk"
-              jarsigner -verbose -sigalg SHA1withRSA -digestalg SHA1 -keystore release.keystore -storepass "${{ secrets.KEYSTORE_PASSWORD }}" -keypass "${{ secrets.KEY_PASSWORD }}" "$apk" "${{ secrets.KEY_ALIAS }}" || true
-              # Align and move to gha folder (apksigner comes with Android SDK build tools)
-              if command -v zipalign >/dev/null 2>&1; then
-                ZIPALIGNED="${apk%.apk}-aligned.apk"
-                zipalign -v -p 4 "$apk" "$ZIPALIGNED" || true
-                mv "$ZIPALIGNED" "$OUTPUTS_DIR/gha/$(basename "$ZIPALIGNED")"
-              else
-                cp "$apk" "$OUTPUTS_DIR/gha/$(basename "$apk")"
-              fi
-            done
-          else
-            echo "No keystore found — skipping explicit jarsigner step (Gradle signing may already have produced signed artifacts)."
-          fi
+          mkdir -p android/app/build/outputs/gha
+          find android -type f -name "*.aab" -o -name "*release*.apk" -exec cp {} android/app/build/outputs/gha/ \; || true
+          ls -lah android/app/build/outputs/gha || true
 
-          # Copy any produced .aab and .apk to outputs directory for artifact upload
-          find . -type f -name "*.aab" -o -name "*release*.apk" -exec cp {} $OUTPUTS_DIR/gha/ \; || true
-          ls -lah $OUTPUTS_DIR/gha || true
-
-      - name: Upload artifacts (signed or produced)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: android-releases
