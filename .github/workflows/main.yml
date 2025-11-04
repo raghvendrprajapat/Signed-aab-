@@ -94,21 +94,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # If repo has a web project, build it and locate/build dir (dist/build/public)
+          # Install deps and build web if web project exists
           if [ -f package.json ]; then
             if [ -f package-lock.json ]; then npm ci; else npm install; fi
-            # run build if present
             if npm run | grep -q " build"; then npm run build || true; fi
             for d in dist build public; do
-              if [ -d "$d" ]; then echo "WEB_BUILD_DIR=$d" >> $GITHUB_ENV; break; fi
+              if [ -d "$d" ]; then
+                echo "WEB_BUILD_DIR=$d" >> $GITHUB_ENV
+                break
+              fi
             done
           fi
-          # fallback minimal page if no build
+
+          # fallback minimal page if no build found
           if ! grep -q WEB_BUILD_DIR $GITHUB_ENV 2>/dev/null; then
             mkdir -p minimal_www
             printf '<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:2rem;">Loading…</body></html>\n' > minimal_www/index.html
             echo "WEB_BUILD_DIR=minimal_www" >> $GITHUB_ENV
           fi
+
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
       - name: Validate inputs
@@ -118,12 +122,16 @@ jobs:
           if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
             echo "❌ APP_ID invalid: $APP_ID"; exit 1
           fi
-          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then echo "❌ VERSION_CODE must be integer"; exit 1; fi
+          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+            echo "❌ VERSION_CODE must be integer"; exit 1
+          fi
           if [[ "$ALLOW_MIXED_CONTENT" != "true" && ! "$WEB_URL" =~ ^https:// ]]; then
             echo "❌ WEB_URL must start with https:// (or set ALLOW_MIXED_CONTENT=true)"; exit 1
           fi
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
-            if [ -z "${!var:-}" ]; then echo "❌ Missing secret: $var"; exit 1; fi
+            if [ -z "${!var:-}" ]; then
+              echo "❌ Missing secret: $var"; exit 1
+            fi
           done
 
       - name: Restore keystore
@@ -133,11 +141,10 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
           ls -l android.keystore
 
-      - name: Ensure android folder exists & init if needed
+      - name: Ensure android folder exists
         shell: bash
         run: |
           set -euo pipefail
-          # prepare android folder when missing (capacitor will add it later if required)
           mkdir -p android
 
       - name: Bundle web assets into Android assets (force include for offline)
@@ -145,26 +152,20 @@ jobs:
         run: |
           set -euo pipefail
           echo "Copying web build from '$WEB_BUILD_DIR' into Android assets..."
-          # remove any previous assets to avoid stale files
           rm -rf android/app/src/main/assets || true
           mkdir -p android/app/src/main/assets/public
-          # copy all files preserving structure
           cp -a "$WEB_BUILD_DIR/." android/app/src/main/assets/public/ || true
-          # also create a 'www' fallback (some templates look for assets/www)
           mkdir -p android/app/src/main/assets/www
           cp -a "$WEB_BUILD_DIR/." android/app/src/main/assets/www/ || true
-          echo "Web assets copied. Listing a few files:"
+          echo "Listing a few copied files:"
           ls -la android/app/src/main/assets/public | sed -n '1,50p' || true
 
       - name: Configure Capacitor (offline-friendly)
         shell: bash
         run: |
           set -euo pipefail
-          # Initialize Capacitor config but DO NOT force server.url to a remote address.
-          # For offline builds we ensure webDir points to the included assets and bundledWebRuntime true.
           npx cap init "$APP_NAME" "$APP_ID" --web-dir="$WEB_BUILD_DIR" || true
 
-          # Build a minimal capacitor.config.json with bundledWebRuntime true and server cleartext flag only
           cat > capacitor.config.json <<'CFG'
 {
   "appId": "__APP_ID__",
@@ -179,7 +180,6 @@ jobs:
   }
 }
 CFG
-          # replace placeholders
           sed -i "s/__APP_ID__/${APP_ID//\//\\/}/g" capacitor.config.json
           sed -i "s/__APP_NAME__/${APP_NAME//\//\\/}/g" capacitor.config.json
           sed -i "s/__WEB_DIR__/${WEB_BUILD_DIR//\//\\/}/g" capacitor.config.json
@@ -192,88 +192,75 @@ CFG
             sed -i "s/__ALLOW_MIXED__/false/g" capacitor.config.json
           fi
 
-          echo "capacitor.config.json written:"
-          sed -n '1,200p' capacitor.config.json || true
-
-          # If user requested extra plugins, install them
-          if [ "$PLUGINS" = "camera" ]; then npm install @capacitor/camera
-          elif [ "$PLUGINS" = "push" ]; then npm install @capacitor/push-notifications
-          elif [ "$PLUGINS" = "location" ]; then npm install @capacitor/geolocation
-          elif [ "$PLUGINS" = "all" ]; then npm install @capacitor/camera @capacitor/push-notifications @capacitor/geolocation
+          if [ "$PLUGINS" = "camera" ]; then
+            npm install @capacitor/camera || true
+          elif [ "$PLUGINS" = "push" ]; then
+            npm install @capacitor/push-notifications || true
+          elif [ "$PLUGINS" = "location" ]; then
+            npm install @capacitor/geolocation || true
+          elif [ "$PLUGINS" = "all" ]; then
+            npm install @capacitor/camera @capacitor/push-notifications @capacitor/geolocation || true
           fi
 
-          # Ensure android platform present and assets copied into Android project
           npx cap add android || true
-          # Use copy (faster) and sync to ensure native projects and web assets are present
           npx cap copy android || true
           npx cap sync android || true
 
-      - name: Apply branding assets from URL(s) (robust)
+      - name: Apply branding assets from URL(s) (optional)
         shell: bash
         working-directory: android
         run: |
           set -euo pipefail
-
           ICON_SRC="${{ github.event.inputs.APP_ICON_URL }}"
           SPLASH_SRC="${{ github.event.inputs.SPLASH_SCREEN_URL }}"
 
           if [ -z "$ICON_SRC" ] && [ -z "$SPLASH_SRC" ]; then
-            echo "No branding URLs provided — skipping branding download"; exit 0
+            echo "No branding URLs provided — skipping branding download"
+            exit 0
           fi
 
           dl() {
             url="$1"; out="$2"
-            echo "curl -> $url  -> $out"
             curl -sfSL "$url" -o "$out" || { echo "curl failed for $url (ignored)"; }
           }
 
+          rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
+          mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
+
           if [ -n "$ICON_SRC" ]; then
             if [[ "$ICON_SRC" =~ \.png$ ]]; then
-              dl "$ICON_SRC" /tmp/icon_src.png
+              dl "$ICON_SRC" /tmp/icon_src.png || true
             else
               case "$ICON_SRC" in */) ;; *) ICON_SRC="$ICON_SRC/";; esac
-              dl "${ICON_SRC}icon_xxxhdpi.png" /tmp/icon_src.png
-              if [ ! -f /tmp/icon_src.png ]; then dl "${ICON_SRC}icon.png" /tmp/icon_src.png; fi
+              dl "${ICON_SRC}icon_xxxhdpi.png" /tmp/icon_src.png || true
+              if [ ! -f /tmp/icon_src.png ]; then dl "${ICON_SRC}icon.png" /tmp/icon_src.png || true; fi
             fi
           fi
 
           if [ -n "$SPLASH_SRC" ]; then
             if [[ "$SPLASH_SRC" =~ \.png$ ]]; then
-              dl "$SPLASH_SRC" /tmp/splash.png
+              dl "$SPLASH_SRC" /tmp/splash.png || true
             else
               case "$SPLASH_SRC" in */) ;; *) SPLASH_SRC="$SPLASH_SRC/";; esac
-              dl "${SPLASH_SRC}splash.png" /tmp/splash.png
+              dl "${SPLASH_SRC}splash.png" /tmp/splash.png || true
             fi
           fi
 
-          echo "Purging old generated resource folders..."
-          rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26 || true
-
-          mkdir -p app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-hdpi
-          mkdir -p app/src/main/res/mipmap-anydpi-v26
-          mkdir -p app/src/main/res/drawable app/src/main/res/drawable-nodpi
-
           if [ -f /tmp/icon_src.png ]; then
-            echo "Processing source icon..."
-            sudo apt-get update -y
+            sudo apt-get update -y || true
             sudo apt-get install -y imagemagick || true
-
             convert /tmp/icon_src.png -background white -alpha remove -alpha off /tmp/icon_flat.png || cp /tmp/icon_src.png /tmp/icon_flat.png || true
-
             convert /tmp/icon_flat.png -resize 192x192\> /tmp/icon_xxxhdpi.png || true
-            convert /tmp/icon_flat.png -resize 144x144\> /tmp/icon_xxhdpi.png  || true
-            convert /tmp/icon_flat.png -resize 96x96\>   /tmp/icon_xhdpi.png   || true
-            convert /tmp/icon_flat.png -resize 72x72\>   /tmp/icon_hdpi.png    || true
+            convert /tmp/icon_flat.png -resize 144x144\> /tmp/icon_xxhdpi.png || true
+            convert /tmp/icon_flat.png -resize 96x96\> /tmp/icon_xhdpi.png || true
+            convert /tmp/icon_flat.png -resize 72x72\> /tmp/icon_hdpi.png || true
 
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_full.png || true
             cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher_full.png || true
             cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher_full.png || true
             cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher_full.png || true
-
-            cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png || true
-            cp /tmp/icon_xxhdpi.png  app/src/main/res/mipmap-xxhdpi/ic_launcher.png || true
-            cp /tmp/icon_xhdpi.png   app/src/main/res/mipmap-xhdpi/ic_launcher.png || true
-            cp /tmp/icon_hdpi.png    app/src/main/res/mipmap-hdpi/ic_launcher.png || true
 
             cp /tmp/icon_xxxhdpi.png app/src/main/res/mipmap-anydpi-v26/ic_launcher_foreground.png || true
             convert /tmp/icon_flat.png -resize 32x32\> /tmp/icon_bg.png || cp /tmp/icon_flat.png /tmp/icon_bg.png || true
@@ -291,15 +278,10 @@ CFG
               '  <background android:drawable="@mipmap/ic_launcher_background"/>' \
               '  <foreground android:drawable="@mipmap/ic_launcher_full"/>' \
               '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml || true
-
-            echo "Icon densities and full variants created."
-          else
-            echo "No icon source found — skipping icon generation."
           fi
 
           if [ -f /tmp/splash.png ]; then
-            echo "Installing splash image..."
-            sudo apt-get update -y
+            sudo apt-get update -y || true
             sudo apt-get install -y imagemagick || true
             convert /tmp/splash.png -background white -alpha remove -alpha off /tmp/splash_flat.png || cp /tmp/splash.png /tmp/splash_flat.png || true
             cp /tmp/splash_flat.png app/src/main/res/drawable-nodpi/splash.png || true
@@ -314,13 +296,7 @@ CFG
               '        <bitmap android:gravity="center" android:src="@drawable/splash" />' \
               '    </item>' \
               '</layer-list>' > "$LAUNCH_XML" || true
-
-            echo "Splash applied and launch_background created/updated."
-          else
-            echo "No /tmp/splash.png found — splash not applied."
           fi
-
-          echo "Branding step done."
 
       - name: Ensure manifest icon entries (use full icon)
         shell: bash
@@ -328,7 +304,10 @@ CFG
         run: |
           set -euo pipefail
           MF="app/src/main/AndroidManifest.xml"
-          if [ ! -f "$MF" ]; then echo "No AndroidManifest.xml found — skipping manifest patch"; exit 0; fi
+          if [ ! -f "$MF" ]; then
+            echo "No AndroidManifest.xml found — skipping manifest patch"
+            exit 0
+          fi
           perl -0777 -pe '
             if (/<application\b[^>]*>/s) {
               $app = $&;
@@ -340,7 +319,6 @@ CFG
               s/\Q$app\E/$new/;
             }
           ' -i "$MF" || true
-          echo "Patched AndroidManifest (first lines):"
           sed -n '1,80p' "$MF" || true
 
       - name: Patch Gradle (version / signing config)
@@ -350,14 +328,15 @@ CFG
           set -euo pipefail
           cp ../android.keystore app/release.keystore
           if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
-          sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
-          sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
-          sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE" || true
-          sed -i -E "s/minSdk[ =]+[0-9]+/minSdk $MIN_SDK/" "$FILE" || true
-          sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion $TARGET_SDK/" "$FILE" || true
-          sed -i -E "s/targetSdk[ =]+[0-9]+/targetSdk $TARGET_SDK/" "$FILE" || true
-          sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE" || true
-          sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
+
+          sed -i -E "s/versionCode[[:space:]]+[0-9]+/versionCode $VERSION_CODE/" "$FILE" || true
+          sed -i -E "s/versionName[[:space:]]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE" || true
+          sed -i -E "s/minSdkVersion[[:space:]]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE" || true
+          sed -i -E "s/minSdk[[:space:]]+[0-9]+/minSdk $MIN_SDK/" "$FILE" || true
+          sed -i -E "s/targetSdkVersion[[:space:]]+[0-9]+/targetSdkVersion $TARGET_SDK/" "$FILE" || true
+          sed -i -E "s/targetSdk[[:space:]]+[0-9]+/targetSdk $TARGET_SDK/" "$FILE" || true
+          sed -i -E "s/compileSdkVersion[[:space:]]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE" || true
+          sed -i -E "s/compileSdk[[:space:]]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE" || true
 
           if ! grep -q "signingConfigs" "$FILE"; then
             {
@@ -398,7 +377,6 @@ CFG
         run: |
           set -euo pipefail
           ./gradlew clean --no-daemon
-          # Build bundle and apk (release)
           ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon
 
           mkdir -p ../out_aab ../out_apk
@@ -414,7 +392,6 @@ CFG
             unzip -l "$APK" | sed -n '1,200p' || true
             unzip -p "$APK" "res/mipmap-anydpi-v26/ic_launcher.xml" 2>/dev/null | sed -n '1,200p' || true
             unzip -p "$APK" "res/drawable/launch_background.xml" 2>/dev/null | sed -n '1,200p' || true
-            # show that web assets exist inside APK (quick check)
             unzip -l "$APK" | grep -E "assets/public|assets/www" || true
           fi
 
