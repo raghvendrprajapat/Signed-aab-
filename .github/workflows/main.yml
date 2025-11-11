@@ -11,6 +11,9 @@ on:
         description: "Package ID (e.g. com.example.app)"
         required: true
         default: "com.example.web2app"
+      WEB_APP_URL:
+        description: "URL of the web app to bundle (Git repo, ZIP file, or live site)"
+        required: true
       WEB_URL:
         description: "Live URL (must be https:// unless you allow http)"
         required: true
@@ -62,6 +65,7 @@ jobs:
     env:
       APP_NAME: ${{ github.event.inputs.APP_NAME }}
       APP_ID: ${{ github.event.inputs.APP_ID }}
+      WEB_APP_URL: ${{ github.event.inputs.WEB_APP_URL }}
       WEB_URL: ${{ github.event.inputs.WEB_URL }}
       VERSION_NAME: ${{ github.event.inputs.VERSION_NAME }}
       VERSION_CODE: ${{ github.event.inputs.VERSION_CODE }}
@@ -90,22 +94,82 @@ jobs:
         with:
           node-version: 20
 
-      - name: Prepare webDir
+      - name: Fetch, Build, and Prepare Web App
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f package.json ]; then
+          echo "::group::Fetching Web App"
+          if [ -z "$WEB_APP_URL" ]; then
+            echo "❌ Missing input: WEB_APP_URL is not set."
+            exit 1
+          fi
+
+          mkdir -p web_src
+          cd web_src
+
+          if [[ "$WEB_APP_URL" == *.git ]] || [[ "$WEB_APP_URL" == *github.com* ]]; then
+            echo "Source appears to be a Git repository. Cloning..."
+            git clone --depth=1 "$WEB_APP_URL" .
+          elif [[ "$WEB_APP_URL" == *.zip ]]; then
+            echo "Source appears to be a ZIP file. Downloading and extracting..."
+            curl -fL "$WEB_APP_URL" -o web.zip
+            unzip web.zip
+          else
+            echo "Source appears to be a live website. Mirroring with wget..."
+            wget --mirror --convert-links --adjust-extension --no-parent --no-verbose "$WEB_APP_URL"
+            # Wget creates a directory based on the domain, find it and move its contents up
+            WGET_DIR=$(find . -maxdepth 1 -type d -name "*.*" -print | head -n 1)
+            if [ -d "$WGET_DIR" ]; then
+              mv $WGET_DIR/* .
+              rmdir "$WGET_DIR"
+            fi
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Building Web App (if necessary)"
+          PKG_JSON=$(find . -maxdepth 2 -name package.json -print -quit)
+          if [ -f "$PKG_JSON" ]; then
+            echo "package.json found at $PKG_JSON. Running build..."
+            cd $(dirname "$PKG_JSON")
             if [ -f package-lock.json ]; then npm ci; else npm install; fi
-            if npm run | grep -q " build"; then npm run build; fi
-            for d in dist build public; do
-              if [ -d "$d" ]; then echo "WEB_BUILD_DIR=$d" >> $GITHUB_ENV; break; fi
-            done
+            if npm run | grep -q " build"; then
+              npm run build
+            else
+              echo "No 'build' script found in package.json, assuming static assets."
+            fi
+            cd -
+          else
+            echo "No package.json found. Assuming static assets."
           fi
-          if ! grep -q WEB_BUILD_DIR $GITHUB_ENV 2>/dev/null; then
-            mkdir -p minimal_www
-            printf '<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:2rem;">Loading…</body></html>\n' > minimal_www/index.html
-            echo "WEB_BUILD_DIR=minimal_www" >> $GITHUB_ENV
+          echo "::endgroup::"
+
+          echo "::group::Locating Web App Build Directory"
+          BUILD_DIR=""
+          for d in dist build public; do
+            DIR_PATH=$(find . -maxdepth 3 -type d -name "$d" -print -quit)
+            if [ -d "$DIR_PATH" ]; then
+              BUILD_DIR="$DIR_PATH"
+              break
+            fi
+          done
+
+          if [ -z "$BUILD_DIR" ]; then
+            # If no standard build directory, find the first directory containing index.html
+            INDEX_HTML=$(find . -maxdepth 3 -name index.html -print -quit)
+            if [ -f "$INDEX_HTML" ]; then
+              BUILD_DIR=$(dirname "$INDEX_HTML")
+            else
+              echo "❌ Critical: Could not find a web build directory (dist, build, public) or an index.html file."
+              exit 1
+            fi
           fi
+
+          echo "Web build directory identified: $BUILD_DIR"
+          # Use a relative path for the environment variable
+          FINAL_BUILD_DIR=$(realpath --relative-to=$PWD/.. "$BUILD_DIR")
+          echo "WEB_BUILD_DIR=$FINAL_BUILD_DIR" >> $GITHUB_ENV
+          echo "::endgroup::"
+
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
       - name: Validate inputs
@@ -130,6 +194,23 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
           ls -l android.keystore
 
+      - name: Copy Web Assets to Android Project
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Copying web assets from $WEB_BUILD_DIR to android/app/src/main/assets/public..."
+          rm -rf android/app/src/main/assets/public
+          mkdir -p android/app/src/main/assets/public
+          cp -R "$WEB_BUILD_DIR"/* android/app/src/main/assets/public/
+
+          echo "Verifying copied assets..."
+          ls -la android/app/src/main/assets/public | sed -n '1,200p'
+          if [ ! -f "android/app/src/main/assets/public/index.html" ]; then
+            echo "❌ Critical: index.html not found in android/app/src/main/assets/public after copy."
+            exit 11
+          fi
+          echo "✅ Web assets copied and verified successfully."
+
       - name: Configure Capacitor for Offline Bundling
         shell: bash
         run: |
@@ -141,7 +222,7 @@ jobs:
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
           printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
-          printf '  "webDir": "%s",\n' "$WEB_BUILD_DIR" >> capacitor.config.json
+          printf '  "webDir": "android/app/src/main/assets/public",\n' >> capacitor.config.json
           printf '  "bundledWebRuntime": true,\n' >> capacitor.config.json
           printf '  "android": {\n' >> capacitor.config.json
           if [ "$ALLOW_MIXED_CONTENT" = "true" ]; then
@@ -408,6 +489,19 @@ jobs:
             exit 1
           fi
           echo "✅ Build artifacts found."
+
+      - name: Inspect APK Contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_FILE=$(find out_apk -name "*.apk" | head -n 1)
+          echo "Inspecting contents of $APK_FILE..."
+          unzip -l "$APK_FILE" | egrep 'assets/public|index.html' || echo "Web assets not found in APK"
+          if ! unzip -l "$APK_FILE" | grep -q "assets/public/index.html"; then
+            echo "❌ Critical: Final APK does not contain assets/public/index.html."
+            exit 1
+          fi
+          echo "✅ Final APK contents verified successfully."
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
