@@ -395,22 +395,28 @@ jobs:
           echo "=== AAB files ==="; ls -l ../out_aab
           echo "=== APK files ==="; ls -l ../out_apk
 
-          if ls ../out_apk/*.apk 1> /dev/null 2>&1; then
-            APK=$(ls ../out_apk/*.apk | head -n1)
-            echo "Listing contents of $APK (top lines):"
-            unzip -l "$APK" | sed -n '1,200p'
-            unzip -p "$APK" "res/mipmap-anydpi-v26/ic_launcher.xml" 2>/dev/null | sed -n '1,200p'
-            unzip -p "$APK" "res/drawable/launch_background.xml" 2>/dev/null | sed -n '1,200p'
+      - name: Verify build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! ls out_aab/*.aab 1> /dev/null 2>&1; then
+            echo "❌ Build failed: No AAB files found in out_aab directory."
+            exit 1
           fi
+          if ! ls out_apk/*.apk 1> /dev/null 2>&1; then
+            echo "❌ Build failed: No APK files found in out_apk directory."
+            exit 1
+          fi
+          echo "✅ Build artifacts found."
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
         with:
           name: signed-aab
-          path: out_aab
+          path: out_aab/*.aab
 
       - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
           name: signed-apk
-          path: out_apk
+          path: out_apk/*.apk
