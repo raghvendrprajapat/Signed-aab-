@@ -4,36 +4,44 @@ on:
   workflow_dispatch:
     inputs:
       WEB_APP_URL:
-        description: "HTTPS URL of web app to fetch or mirror"
+        description: "HTTPS web app URL to fetch and bundle"
         required: true
-      versionName:
-        description: "Version name for build.gradle"
-        required: false
-        type: string
-        default: "1.0.0"
-      versionCode:
-        description: "Version code (increment per release)"
-        required: false
-        type: number
-        default: 1
-      targetSdk:
-        description: "Default target SDK version for Android build"
-        required: false
-        type: number
-        default: 35
       httpsOnly:
-        description: "Enforces HTTPS-only input validation"
+        description: "Enforces only HTTPS URLs"
         required: false
         type: boolean
         default: true
+      targetSdk:
+        description: "Android target SDK version"
+        required: false
+        type: number
+        default: 35
+      iconPngUrl:
+        description: "HTTPS PNG for app icon"
+        required: false
+        type: string
+      splashPngUrl:
+        description: "HTTPS PNG for splash screen"
+        required: false
+        type: string
       buildType:
-        description: "Build type: `release` or `debug`"
+        description: "Build type: release or debug"
         required: false
         type: choice
         default: 'release'
         options:
           - 'release'
           - 'debug'
+      versionCode:
+        description: "Version code"
+        required: false
+        type: number
+        default: 1
+      versionName:
+        description: "Version name for build.gradle"
+        required: false
+        type: string
+        default: "1.0.0"
       enableOfflineCheck:
         description: "Run verification that assets/public/index.html exists before build"
         required: false
@@ -52,8 +60,8 @@ jobs:
       APP_NAME: "My Web2App"
       APP_ID: "com.example.web2app"
       WEB_APP_URL: ${{ github.event.inputs.WEB_APP_URL }}
-      VERSION_NAME: ${{ github.event.inputs.versionName }}
       VERSION_CODE: ${{ github.event.inputs.versionCode }}
+      VERSION_NAME: ${{ github.event.inputs.versionName }}
       TARGET_SDK: ${{ github.event.inputs.targetSdk }}
       MIN_SDK: "22"
 
@@ -170,9 +178,13 @@ jobs:
             echo "❌ APP_ID invalid: $APP_ID"; exit 1
           fi
           if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then echo "❌ VERSION_CODE must be integer"; exit 1; fi
-          if [[ "${{ github.event.inputs.httpsOnly }}" == "true" && ! "$WEB_APP_URL" =~ ^https:// ]]; then
-            echo "::error::Insecure URL detected. Only HTTPS URLs are allowed."
-            exit 11
+          if [[ "${{ github.event.inputs.httpsOnly }}" == "true" ]]; then
+            for url in "$WEB_APP_URL" "${{ github.event.inputs.iconPngUrl }}" "${{ github.event.inputs.splashPngUrl }}"; do
+              if [[ -n "$url" && ! "$url" =~ ^https:// ]]; then
+                echo "::error::Insecure URL detected: $url. Only HTTPS URLs are allowed."
+                exit 11
+              fi
+            done
           fi
           for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
             if [ -z "${!var:-}" ]; then echo "❌ Missing secret: $var"; exit 1; fi
@@ -207,6 +219,35 @@ jobs:
             exit 11
           fi
           echo "✅ Web assets verified successfully."
+
+      - name: Apply Branding Assets
+        if: github.event.inputs.iconPngUrl || github.event.inputs.splashPngUrl
+        shell: bash
+        working-directory: android
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y && sudo apt-get install -y imagemagick
+
+          ICON_SRC="${{ github.event.inputs.iconPngUrl }}"
+          SPLASH_SRC="${{ github.event.inputs.splashPngUrl }}"
+
+          if [ -n "$ICON_SRC" ]; then
+            curl -fL "$ICON_SRC" -o /tmp/icon.png
+            rm -rf app/src/main/res/mipmap-*
+            mkdir -p app/src/main/res/mipmap-hdpi app/src/main/res/mipmap-mdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xxxhdpi
+            convert /tmp/icon.png -resize 72x72 app/src/main/res/mipmap-hdpi/ic_launcher.png
+            convert /tmp/icon.png -resize 48x48 app/src/main/res/mipmap-mdpi/ic_launcher.png
+            convert /tmp/icon.png -resize 96x96 app/src/main/res/mipmap-xhdpi/ic_launcher.png
+            convert /tmp/icon.png -resize 144x144 app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+            convert /tmp/icon.png -resize 192x192 app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          fi
+
+          if [ -n "$SPLASH_SRC" ]; then
+            curl -fL "$SPLASH_SRC" -o /tmp/splash.png
+            rm -rf app/src/main/res/drawable/splash.png
+            mkdir -p app/src/main/res/drawable
+            cp /tmp/splash.png app/src/main/res/drawable/splash.png
+          fi
 
       - name: Configure Capacitor for Offline Bundling
         shell: bash
