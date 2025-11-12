@@ -64,11 +64,10 @@ jobs:
       VERSION_NAME: ${{ github.event.inputs.versionName }}
       TARGET_SDK: ${{ github.event.inputs.targetSdk }}
       MIN_SDK: "22"
-
-      KEYSTORE_BASE64:   ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-      KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
-      KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
     steps:
       - name: Checkout repo
@@ -77,13 +76,43 @@ jobs:
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: 21
+          distribution: 'temurin'
+          java-version: '21'
 
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ inputs.WEB_APP_URL }}" ]; then
+            echo "::error::WEB_APP_URL is required"
+            exit 11
+          fi
+          if [ "${{ inputs.httpsOnly }}" = "true" ]; then
+            if [[ "${{ inputs.WEB_APP_URL }}" != https://* ]]; then
+              echo "::error::Insecure URL detected. Only HTTPS URLs are allowed for WEB_APP_URL."
+              exit 11
+            fi
+            if [ -n "${{ inputs.iconPngUrl }}" ] && [[ "${{ inputs.iconPngUrl }}" != https://* ]]; then
+              echo "::error::iconPngUrl must be HTTPS."
+              exit 11
+            fi
+            if [ -n "${{ inputs.splashPngUrl }}" ] && [[ "${{ inputs.splashPngUrl }}" != https://* ]]; then
+              echo "::error::splashPngUrl must be HTTPS."
+              exit 11
+            fi
+          fi
+
+      - name: Restore keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$KEYSTORE_BASE64" | base64 --decode > android.keystore
+          ls -l android.keystore
 
       - name: Fetch, Build, and Prepare Web App
         shell: bash
@@ -94,11 +123,9 @@ jobs:
             echo "❌ Missing input: WEB_APP_URL is not set."
             exit 1
           fi
-
           mkdir -p web_src
           cd web_src
-
-          if [[ "$WEB_APP_URL" == *.git ]] || [[ "$WEB_APP_URL" == *github.com* ]]; then
+          if [[ "$WEB_APP_URL" == *.git ]]; then
             echo "Source appears to be a Git repository. Cloning..."
             git clone --depth=1 "$WEB_APP_URL" .
           elif [[ "$WEB_APP_URL" == *.zip ]]; then
@@ -108,22 +135,18 @@ jobs:
           else
             echo "Source appears to be a live website. Mirroring with wget..."
             wget --mirror --convert-links --adjust-extension --no-parent --no-verbose "$WEB_APP_URL"
-            # Wget creates a directory based on the domain; find it and move its contents to the current directory.
-            WGET_DIR=$(find . -maxdepth 1 -type d -name "*.*" -print -quit)
+            WGET_DIR=$(find . -maxdepth 1 -mindepth 1 -type d -print -quit)
             if [ -n "$WGET_DIR" ] && [ -d "$WGET_DIR" ] && [ "$(realpath "$WGET_DIR")" != "$(realpath .)" ]; then
               echo "Moving mirrored content from '$WGET_DIR' to current directory..."
-              # Enable dotglob to include hidden files in the move.
               shopt -s dotglob
               mv -v "$WGET_DIR"/* .
               shopt -u dotglob
-              # Remove the now-empty source directory.
               rmdir "$WGET_DIR"
             else
               echo "Mirrored content is already in the correct directory."
             fi
           fi
           echo "::endgroup::"
-
           echo "::group::Building Web App (if necessary)"
           PKG_JSON=$(find . -maxdepth 2 -name package.json -print -quit)
           if [ -f "$PKG_JSON" ]; then
@@ -140,7 +163,6 @@ jobs:
             echo "No package.json found. Assuming static assets."
           fi
           echo "::endgroup::"
-
           echo "::group::Locating Web App Build Directory"
           BUILD_DIR=""
           for d in dist build public; do
@@ -150,9 +172,7 @@ jobs:
               break
             fi
           done
-
           if [ -z "$BUILD_DIR" ]; then
-            # If no standard build directory, find the first directory containing index.html
             INDEX_HTML=$(find . -maxdepth 3 -name index.html -print -quit)
             if [ -f "$INDEX_HTML" ]; then
               BUILD_DIR=$(dirname "$INDEX_HTML")
@@ -161,41 +181,11 @@ jobs:
               exit 1
             fi
           fi
-
           echo "Web build directory identified: $BUILD_DIR"
-          # Use a relative path for the environment variable
           FINAL_BUILD_DIR=$(realpath --relative-to=$PWD/.. "$BUILD_DIR")
           echo "WEB_BUILD_DIR=$FINAL_BUILD_DIR" >> $GITHUB_ENV
           echo "::endgroup::"
-
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
-
-      - name: Validate inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
-            echo "❌ APP_ID invalid: $APP_ID"; exit 1
-          fi
-          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then echo "❌ VERSION_CODE must be integer"; exit 1; fi
-          if [[ "${{ github.event.inputs.httpsOnly }}" == "true" ]]; then
-            for url in "$WEB_APP_URL" "${{ github.event.inputs.iconPngUrl }}" "${{ github.event.inputs.splashPngUrl }}"; do
-              if [[ -n "$url" && ! "$url" =~ ^https:// ]]; then
-                echo "::error::Insecure URL detected: $url. Only HTTPS URLs are allowed."
-                exit 11
-              fi
-            done
-          fi
-          for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
-            if [ -z "${!var:-}" ]; then echo "❌ Missing secret: $var"; exit 1; fi
-          done
-
-      - name: Restore keystore
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
-          ls -l android.keystore
 
       - name: Copy Web Assets to Android Project
         shell: bash
@@ -227,24 +217,26 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y && sudo apt-get install -y imagemagick
-
           ICON_SRC="${{ github.event.inputs.iconPngUrl }}"
           SPLASH_SRC="${{ github.event.inputs.splashPngUrl }}"
-
           if [ -n "$ICON_SRC" ]; then
             curl -fL "$ICON_SRC" -o /tmp/icon.png
-            rm -rf app/src/main/res/mipmap-*
-            mkdir -p app/src/main/res/mipmap-hdpi app/src/main/res/mipmap-mdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xxxhdpi
+            rm -rf app/src/main/res/mipmap-* app/src/main/res/drawable* app/src/main/res/mipmap-anydpi-v26
+            mkdir -p app/src/main/res/mipmap-hdpi app/src/main/res/mipmap-mdpi app/src/main/res/mipmap-xhdpi app/src/main/res/mipmap-xxhdpi app/src/main/res/mipmap-xxxhdpi app/src/main/res/mipmap-anydpi-v26 app/src/main/res/drawable
             convert /tmp/icon.png -resize 72x72 app/src/main/res/mipmap-hdpi/ic_launcher.png
             convert /tmp/icon.png -resize 48x48 app/src/main/res/mipmap-mdpi/ic_launcher.png
             convert /tmp/icon.png -resize 96x96 app/src/main/res/mipmap-xhdpi/ic_launcher.png
             convert /tmp/icon.png -resize 144x144 app/src/main/res/mipmap-xxhdpi/ic_launcher.png
             convert /tmp/icon.png -resize 192x192 app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+              '  <background android:drawable="@android:color/white"/>' \
+              '  <foreground android:drawable="@mipmap/ic_launcher_foreground"/>' \
+              '</adaptive-icon>' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+            convert /tmp/icon.png -resize 432x432 app/src/main/res/drawable/ic_launcher_foreground.png
           fi
-
           if [ -n "$SPLASH_SRC" ]; then
             curl -fL "$SPLASH_SRC" -o /tmp/splash.png
-            rm -rf app/src/main/res/drawable/splash.png
             mkdir -p app/src/main/res/drawable
             cp /tmp/splash.png app/src/main/res/drawable/splash.png
           fi
@@ -253,21 +245,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "WEB_BUILD_DIR currently set to: $WEB_BUILD_DIR"
-
-          # Create a capacitor.config.json for a fully offline-bundled app.
-          # "bundledWebRuntime" is true and the "server" key is omitted.
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
           printf '  "appName": "%s",\n' "$APP_NAME" >> capacitor.config.json
           printf '  "webDir": "android/app/src/main/assets/public",\n' >> capacitor.config.json
           printf '  "bundledWebRuntime": true\n' >> capacitor.config.json
           printf '}\n' >> capacitor.config.json
-
-          echo "Capacitor config generated for offline bundling:"
-          cat capacitor.config.json
-
-          # Add Android platform and sync all web assets
           npx cap add android
           npx cap sync android
 
@@ -281,11 +264,8 @@ jobs:
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE"
           sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE"
           sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE"
-          sed -i -E "s/minSdk[ =]+[0-9]+/minSdk $MIN_SDK/" "$FILE"
           sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion $TARGET_SDK/" "$FILE"
-          sed -i -E "s/targetSdk[ =]+[0-9]+/targetSdk $TARGET_SDK/" "$FILE"
           sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE"
-          sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE"
           if ! grep -q "signingConfigs" "$FILE"; then
             {
               echo ""
@@ -317,29 +297,18 @@ jobs:
           set -euo pipefail
           BUILD_TYPE="${{ github.event.inputs.buildType }}"
           BUILD_TYPE_CAPITALIZED="$(tr '[:lower:]' '[:upper:]' <<< ${BUILD_TYPE:0:1})${BUILD_TYPE:1}"
-
           ./gradlew clean --no-daemon
           ./gradlew :app:bundle${BUILD_TYPE_CAPITALIZED} :app:assemble${BUILD_TYPE_CAPITALIZED} --no-daemon
-
           mkdir -p ../out_aab ../out_apk
           cp app/build/outputs/bundle/${BUILD_TYPE}/*.aab ../out_aab/
           cp app/build/outputs/apk/${BUILD_TYPE}/*.apk ../out_apk/
-
-          echo "=== AAB files ==="; ls -l ../out_aab
-          echo "=== APK files ==="; ls -l ../out_apk
 
       - name: Verify build artifacts
         shell: bash
         run: |
           set -euo pipefail
-          if ! ls out_aab/*.aab 1> /dev/null 2>&1; then
-            echo "❌ Build failed: No AAB files found in out_aab directory."
-            exit 1
-          fi
-          if ! ls out_apk/*.apk 1> /dev/null 2>&1; then
-            echo "❌ Build failed: No APK files found in out_apk directory."
-            exit 1
-          fi
+          if ! ls out_aab/*.aab 1> /dev/null 2>&1; then echo "❌ Build failed: No AAB files found"; exit 1; fi
+          if ! ls out_apk/*.apk 1> /dev/null 2>&1; then echo "❌ Build failed: No APK files found"; exit 1; fi
           echo "✅ Build artifacts found."
 
       - name: Inspect APK Contents
