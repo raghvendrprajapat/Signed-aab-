@@ -37,16 +37,6 @@ on:
         required: false
         type: number
         default: 1
-      versionName:
-        description: "Version name for build.gradle"
-        required: false
-        type: string
-        default: "1.0.0"
-      enableOfflineCheck:
-        description: "Run verification that assets/public/index.html exists before build"
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -61,13 +51,12 @@ jobs:
       APP_ID: "com.example.web2app"
       WEB_APP_URL: ${{ github.event.inputs.WEB_APP_URL }}
       VERSION_CODE: ${{ github.event.inputs.versionCode }}
-      VERSION_NAME: ${{ github.event.inputs.versionName }}
       TARGET_SDK: ${{ github.event.inputs.targetSdk }}
       MIN_SDK: "22"
-      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      KEYSTORE_BASE64: ${{ secrets.KEYSTOREFILEBASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTOREPASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEYSTOREALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEYSTOREPASSWORD }}
 
     steps:
       - name: Checkout repo
@@ -119,10 +108,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "::group::Fetching Web App"
-          if [ -z "$WEB_APP_URL" ]; then
-            echo "❌ Missing input: WEB_APP_URL is not set."
-            exit 1
-          fi
           mkdir -p web_src
           cd web_src
           if [[ "$WEB_APP_URL" == *.git ]]; then
@@ -198,12 +183,10 @@ jobs:
           echo "✅ Web assets copied successfully."
 
       - name: Verify Copied Web Assets
-        if: github.event.inputs.enableOfflineCheck == true
         shell: bash
         run: |
           set -euo pipefail
           echo "Verifying copied assets..."
-          ls -la android/app/src/main/assets/public | sed -n '1,200p'
           if [ ! -f "android/app/src/main/assets/public/index.html" ]; then
             echo "❌ Critical: index.html not found in android/app/src/main/assets/public after copy."
             exit 11
@@ -262,7 +245,6 @@ jobs:
           cp ../android.keystore app/release.keystore
           if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
           sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE"
-          sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE"
           sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE"
           sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion $TARGET_SDK/" "$FILE"
           sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE"
@@ -312,13 +294,10 @@ jobs:
           echo "✅ Build artifacts found."
 
       - name: Inspect APK Contents
-        if: github.event.inputs.enableOfflineCheck == true
         shell: bash
         run: |
           set -euo pipefail
           APK_FILE=$(find out_apk -name "*.apk" | head -n 1)
-          echo "Inspecting contents of $APK_FILE..."
-          unzip -l "$APK_FILE" | egrep 'assets/public|index.html' || echo "Web assets not found in APK"
           if ! unzip -l "$APK_FILE" | grep -q "assets/public/index.html"; then
             echo "❌ Critical: Final APK does not contain assets/public/index.html."
             exit 1
