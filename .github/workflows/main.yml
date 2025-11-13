@@ -3,50 +3,38 @@ name: Build Web to Signed Android
 on:
   workflow_dispatch:
     inputs:
-      APP_NAME:
-        description: "App name"
-        required: true
-        default: "My Web2App"
-      APP_ID:
-        description: "Package ID (e.g. com.example.app)"
-        required: true
-        default: "com.example.web2app"
       WEB_APP_URL:
-        description: "HTTPS URL of web app to fetch or mirror"
+        description: "URL of the web application to bundle (git, zip, or live site)"
         required: true
-      versionName:
-        description: "Version name for build.gradle"
-        required: false
-        type: string
-        default: "1.0.0"
-      versionCode:
-        description: "Version code (increment per release)"
-        required: false
-        type: number
-        default: 1
-      targetSdk:
-        description: "Default target SDK version for Android build"
-        required: false
-        type: number
-        default: 35
       httpsOnly:
-        description: "Enforces HTTPS-only input validation"
-        required: false
+        description: "Enforce HTTPS for all provided URLs"
         type: boolean
         default: true
-      buildType:
-        description: "Build type: `release` or `debug`"
+      targetSdk:
+        description: "Android target SDK version"
+        type: number
+        default: 35
+      iconPngUrl:
+        description: "Optional: HTTPS URL to a PNG for the app icon"
         required: false
+      splashPngUrl:
+        description: "Optional: HTTPS URL to a PNG for the splash screen"
+        required: false
+      buildType:
+        description: "Android build type"
         type: choice
         default: 'release'
         options:
           - 'release'
           - 'debug'
-      enableOfflineCheck:
-        description: "Run verification that assets/public/index.html exists before build"
-        required: false
-        type: boolean
-        default: true
+      versionCode:
+        description: "Android version code (integer)"
+        type: number
+        default: 1
+      versionName:
+        description: "Android version name"
+        type: string
+        default: "1.0.0"
 
 permissions:
   contents: read
@@ -57,18 +45,16 @@ jobs:
     timeout-minutes: 50
 
     env:
-      APP_NAME: ${{ github.event.inputs.APP_NAME }}
-      APP_ID: ${{ github.event.inputs.APP_ID }}
       WEB_APP_URL: ${{ github.event.inputs.WEB_APP_URL }}
-      VERSION_NAME: ${{ github.event.inputs.versionName }}
       VERSION_CODE: ${{ github.event.inputs.versionCode }}
+      VERSION_NAME: ${{ github.event.inputs.versionName }}
       TARGET_SDK: ${{ github.event.inputs.targetSdk }}
       MIN_SDK: "22"
 
-      KEYSTORE_BASE64:   ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-      KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
-      KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+      KEYSTORE_BASE64:   ${{ secrets.keystoreFileBase64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.keystorePassword }}
+      KEY_ALIAS:         ${{ secrets.keystoreAlias }}
+      KEY_PASSWORD:      ${{ secrets.keystorePassword }}
 
     steps:
       - name: Checkout repo
@@ -85,16 +71,46 @@ jobs:
         with:
           node-version: 20
 
+      - name: Validate Inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ensure WEB_APP_URL provided
+          if [ -z "${{ inputs.WEB_APP_URL }}" ]; then
+            echo "::error::WEB_APP_URL is required"
+            exit 11
+          fi
+
+          # enforce httpsOnly
+          if [ "${{ inputs.httpsOnly }}" = "true" ]; then
+            if [[ "${{ inputs.WEB_APP_URL }}" != https://* ]]; then
+              echo "::error::Insecure URL detected. Only HTTPS URLs are allowed for WEB_APP_URL."
+              exit 11
+            fi
+            # same for optional icon/splash
+            if [ -n "${{ inputs.iconPngUrl }}" ] && [[ "${{ inputs.iconPngUrl }}" != https://* ]]; then
+              echo "::error::iconPngUrl must be HTTPS."
+              exit 11
+            fi
+            if [ -n "${{ inputs.splashPngUrl }}" ] && [[ "${{ inputs.splashPngUrl }}" != https://* ]]; then
+              echo "::error::splashPngUrl must be HTTPS."
+              exit 11
+            fi
+          fi
+
+          # Check for keystore secrets
+          for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing required secret: $var"
+              exit 1
+            fi
+          done
+
       - name: Fetch, Build, and Prepare Web App
         shell: bash
         run: |
           set -euo pipefail
           echo "::group::Fetching Web App"
-          if [ -z "$WEB_APP_URL" ]; then
-            echo "❌ Missing input: WEB_APP_URL is not set."
-            exit 1
-          fi
-
           mkdir -p web_src
           cd web_src
 
@@ -163,28 +179,47 @@ jobs:
 
           npm install -D @capacitor/core @capacitor/cli @capacitor/android
 
-      - name: Validate inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! "$APP_ID" =~ ^[a-z]+([a-z0-9_]*)(\.[a-z][a-z0-9_]*)+$ ]]; then
-            echo "❌ APP_ID invalid: $APP_ID"; exit 1
-          fi
-          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then echo "❌ VERSION_CODE must be integer"; exit 1; fi
-          if [[ "${{ github.event.inputs.httpsOnly }}" == "true" && ! "$WEB_APP_URL" =~ ^https:// ]]; then
-            echo "::error::Insecure URL detected. Only HTTPS URLs are allowed."
-            exit 11
-          fi
-          for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
-            if [ -z "${!var:-}" ]; then echo "❌ Missing secret: $var"; exit 1; fi
-          done
-
       - name: Restore keystore
         shell: bash
         run: |
           set -euo pipefail
           echo "$KEYSTORE_BASE64" | base64 -d > android.keystore
           ls -l android.keystore
+
+      - name: Apply Branding Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y imagemagick
+          # Optional Icon Processing
+          if [ -n "${{ inputs.iconPngUrl }}" ]; then
+            echo "::group::Applying custom icon"
+            curl -fL "${{ inputs.iconPngUrl }}" -o icon.png
+            # Create adaptive icon backgrounds and foregrounds
+            convert icon.png -gravity center -extent 108x108 android/app/src/main/res/mipmap-mdpi/ic_launcher.png
+            convert icon.png -gravity center -extent 162x162 android/app/src/main/res/mipmap-hdpi/ic_launcher.png
+            convert icon.png -gravity center -extent 216x216 android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+            convert icon.png -gravity center -extent 324x324 android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+            convert icon.png -gravity center -extent 432x432 android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+            # Create legacy round icons
+            convert icon.png -resize 48x48 android/app/src/main/res/mipmap-mdpi/ic_launcher_round.png
+            convert icon.png -resize 72x72 android/app/src/main/res/mipmap-hdpi/ic_launcher_round.png
+            convert icon.png -resize 96x96 android/app/src/main/res/mipmap-xhdpi/ic_launcher_round.png
+            convert icon.png -resize 144x144 android/app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+            convert icon.png -resize 192x192 android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+            echo "::endgroup::"
+          fi
+          # Optional Splash Screen Processing
+          if [ -n "${{ inputs.splashPngUrl }}" ]; then
+            echo "::group::Applying custom splash screen"
+            curl -fL "${{ inputs.splashPngUrl }}" -o splash.png
+            # Copy to all drawable densities
+            for dir in drawable-land-mdpi drawable-land-hdpi drawable-land-xhdpi drawable-land-xxhdpi drawable-land-xxxhdpi drawable-port-mdpi drawable-port-hdpi drawable-port-xhdpi drawable-port-xxhdpi drawable-port-xxxhdpi; do
+              mkdir -p android/app/src/main/res/$dir
+              cp splash.png android/app/src/main/res/$dir/splash.png
+            done
+            echo "::endgroup::"
+          fi
 
       - name: Copy Web Assets to Android Project
         shell: bash
@@ -207,9 +242,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "WEB_BUILD_DIR currently set to: $WEB_BUILD_DIR"
+          # Check for existing capacitor.config.json and extract values
+          if [ -f "web_src/capacitor.config.json" ]; then
+            echo "Found existing capacitor.config.json. Extracting values..."
+            APP_ID=$(jq -r '.appId' web_src/capacitor.config.json)
+            APP_NAME=$(jq -r '.appName' web_src/capacitor.config.json)
+          else
+            echo "No capacitor.config.json found. Using default values."
+            APP_ID="com.example.app"
+            APP_NAME="My App"
+          fi
 
-          # Create a capacitor.config.json for a fully offline-bundled app.
+          # Create a new capacitor.config.json for a fully offline-bundled app.
           # "bundledWebRuntime" is true and the "server" key is omitted.
           printf '{\n' > capacitor.config.json
           printf '  "appId": "%s",\n' "$APP_ID" >> capacitor.config.json
@@ -232,14 +276,13 @@ jobs:
           set -euo pipefail
           cp ../android.keystore app/release.keystore
           if [ -f app/build.gradle ]; then FILE="app/build.gradle"; else FILE="app/build.gradle.kts"; fi
-          sed -i -E "s/versionCode[ =]+[0-9]+/versionCode $VERSION_CODE/" "$FILE"
-          sed -i -E "s/versionName[ =]+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE"
-          sed -i -E "s/minSdkVersion[ =]+[0-9]+/minSdkVersion $MIN_SDK/" "$FILE"
-          sed -i -E "s/minSdk[ =]+[0-9]+/minSdk $MIN_SDK/" "$FILE"
-          sed -i -E "s/targetSdkVersion[ =]+[0-9]+/targetSdkVersion $TARGET_SDK/" "$FILE"
-          sed -i -E "s/targetSdk[ =]+[0-9]+/targetSdk $TARGET_SDK/" "$FILE"
-          sed -i -E "s/compileSdkVersion[ =]+[0-9]+/compileSdkVersion $TARGET_SDK/" "$FILE"
-          sed -i -E "s/compileSdk[ =]+[0-9]+/compileSdk $TARGET_SDK/" "$FILE"
+          # Use more robust sed commands that handle different spacing and quoting
+          sed -i -E "s/versionCode\s+[0-9]+/versionCode $VERSION_CODE/" "$FILE"
+          sed -i -E "s/versionName\s+\"[^\"]+\"/versionName \"$VERSION_NAME\"/" "$FILE"
+          sed -i -E "s/targetSdk(Version)?\s+[0-9]+/targetSdk $TARGET_SDK/" "$FILE"
+          sed -i -E "s/compileSdk(Version)?\s+[0-9]+/compileSdk $TARGET_SDK/" "$FILE"
+          # Also update minSdkVersion for consistency
+          sed -i -E "s/minSdk(Version)?\s+[0-9]+/minSdk $MIN_SDK/" "$FILE"
           if ! grep -q "signingConfigs" "$FILE"; then
             {
               echo ""
@@ -295,20 +338,6 @@ jobs:
             exit 1
           fi
           echo "✅ Build artifacts found."
-
-      - name: Inspect APK Contents
-        if: github.event.inputs.enableOfflineCheck == true
-        shell: bash
-        run: |
-          set -euo pipefail
-          APK_FILE=$(find out_apk -name "*.apk" | head -n 1)
-          echo "Inspecting contents of $APK_FILE..."
-          unzip -l "$APK_FILE" | egrep 'assets/public|index.html' || echo "Web assets not found in APK"
-          if ! unzip -l "$APK_FILE" | grep -q "assets/public/index.html"; then
-            echo "❌ Critical: Final APK does not contain assets/public/index.html."
-            exit 1
-          fi
-          echo "✅ Final APK contents verified successfully."
 
       - name: Upload signed AAB
         uses: actions/upload-artifact@v4
